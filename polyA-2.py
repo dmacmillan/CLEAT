@@ -170,6 +170,27 @@ def getQueryBlocks(align):
         start = start+diff
     return query_blocks
 
+def inferStrand(align, overlapping_features):
+    half = len(overlapping_features)/2
+    i = 0
+    strand = None
+    for feat in overlapping_features:
+        if (feat.feature == '3UTR'):
+            if (i < half):
+                strand = '+'
+            else:
+                strand = '-'
+            return strand
+        elif (feat.feature == '5UTR'):
+            if (i < half):
+                strand = '-'
+            else:
+                strand = '+'
+            return strand
+        else:
+            return None
+        i += 1
+
 # Iterate contig to genome alignments
 for align in aligns:
     # Check if has polyA tail
@@ -177,9 +198,12 @@ for align in aligns:
     # Obtain reads spanning contig
     chrom = aligns.getrname(align.tid)
     print 'Looking at contig: {}-{}-{}'.format(align.qname, align.reference_start, align.reference_end)
-    print 'Is reverse?: {}'.format(align.is_reverse)
     read_count = 0
     strand = '+' if align.is_reverse == True else '-'
+    
+    # Check both ends of contig for 3UTR
+    
+
 #   print 'blocks: {}'.format(align.blocks)
 #   print 'tblocks: {}'.format(cigarToBlocks(align.cigar, align.reference_start+1, strand)[0])
 #   print 'qblocks: {}'.format(cigarToBlocks(align.cigar, align.reference_start+1, strand)[1])
@@ -187,8 +211,11 @@ for align in aligns:
     for overlapping_read in r2c.fetch(align.qname, align.qstart, align.qend):
         read_count += 1
     feats = features.fetch(chrom, align.reference_start, align.reference_end)
+    feature_list = []
+    for feat in feats:
+        feature_list.append(feat)
     utr3 = None
-    for feature in feats:
+    for feature in feature_list:
         if (feature.feature == '3UTR'):
             if (utr3 is None):
                 utr3 = feature
@@ -196,6 +223,25 @@ for align in aligns:
                 utr3 = feature
         #print '\tFeature: {}\t{}\t{}\t{}'.format(feature.transcript_id,feature.feature,feature.start,feature.end)
     print '\tutr3: {}\t{}\t{}\t{}'.format(utr3.transcript_id, utr3.feature, utr3.start, utr3.end)
+    inf_strand = inferStrand(align, feature_list)
+    if (inf_strand is None):
+        print 'Strand information could not be found nor inferred!'
+    if (inf_strand == '+'):
+        cleavage_site = align.reference_start
+        if (strand == '+'):
+            clipped_pos = 'start'
+            last_matched = align.qstart
+        else:
+            clipped_pos = 'end'
+            last_matched = align.qend
+    else:
+        cleavage_site = align.reference_end
+        if (strand == '+'):
+            clipped_pos = 'end'
+            last_matched = align.qend
+        else:
+            clipped_pos = 'start'
+            last_matched = align.qstart
     print '-'*50
 
 def cigarScore(cigar_string, start, end):
