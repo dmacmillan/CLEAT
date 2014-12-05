@@ -63,6 +63,19 @@ features = pysam.TabixFile(args.annot, parser=pysam.asGTF())
 # Reads to contigs alignment (r2c)
 r2c = pysam.AlignmentFile(args.r2c, "rb")
 
+def int_to_base_qual(qual_int, offset):
+    """Converts integer to base quality base"""
+    if offset == 64 or offset == 33:
+        return chr(qual_int + offset)
+
+# Poor quals (poor_quals)
+poor_quals = ''
+if args.trim_reads:
+    for i in range(args.trim_reads + 1):
+        poor_qual = int_to_base_qual(i, 33)
+        if poor_qual is not None:
+            poor_quals += poor_qual
+
 def findTailContig(align, contig, min_len, max_nonAT):
     junction_buffer = 50
     # clipped represents [start, end]
@@ -96,13 +109,45 @@ def qposToTpos(align, qpos):
             tpos = blocks[block][1] - (qpos - blocks[block][1])
     return tpos
 
-def isPolyATail(seq, min_len, max_nonAT):
-    result = True
-    nonATs = len(seq)-seq.count('A')-seq.count('T')
-    if (seq is None) or (seq == '') or (nonATs > min_len):
-        return False
-    if (float(max_nonAT)[0]/max_nonAT[1]) < (float(nonATs)/(len(seq)-nonATs)):
-        return False
+def check_freq(seq):
+    """Returns frequency of each base in given sequence"""
+    freq = {}
+    for nt in seq:
+        if not freq.has_key(nt.upper()):
+            freq[nt.upper()] = 0
+        freq[nt.upper()] += 1
+    return freq
+
+def is_polyA_tail(seq, expected_base, min_len, max_nonAT_allowed):
+        """Determines if sequence can be possible tail
+        
+        min_len = minimum number of expected base in seq
+        max_nonAT_allowed(N,M) = N base(s) other than expected base allowed
+                                 per stretch of M bases
+        """
+        result = True
+    
+        if seq is None or seq == '' or expected_base is None or not expected_base in seq:
+            return False
+            
+        # minimum number of As or Ts
+        freq = check_freq(seq)
+        if freq[expected_base] < min_len:
+            return False
+
+        for i in range(0, len(seq), max_nonAT_allowed[1]):
+            subseq = seq[i:i+10]
+        
+            freq = self.check_freq(subseq)
+            non_expected_freq = 0
+            for base, f in freq.iteritems():
+                if base.upper() != expected_base.upper():
+                    non_expected_freq += f
+            
+            if non_expected_freq > max_nonAT_allowed[0]:
+                result = False
+                
+        return result
 
 def getQueryLenFromCigar(cigar):
     lens = []
@@ -191,6 +236,145 @@ def inferStrand(align, overlapping_features):
             return None
         i += 1
 
+
+def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, txt, homo_len=20, max_mismatch=0):
+    """Finds reads pairs where one mate is mapped to contig and the other mate (mapped elsewhere or unmapped)
+    is a potential polyA tail
+    
+    The mate that is mapped to the contig (anchor) should be pointing outwards to the edge of the contig.
+    The mate that is potential polyA tail can be unmapped or mapped to another contig.  If the mate is unmapped,
+    it's expected to be stored under the same contig.  Unfortunately this is not the behaviour of BWA-SW so all the 
+    unmapped mates are ignored for BWA-SW alignments.
+    
+    A matching transcript is provided.  The only place this is used is in the check of whether the vicinity of the 
+    cleavage site has a homopolyer run.  The transcript strand is used for deciding whether the upstream or downstream
+    region of the cleavage site should be checked.  If a polyT or polyA is in the neighborhood (200bp), then the case
+    won't be further explored.
+    """
+    print '@{}\t{}\t{}\t{}\t{}\t{}'.format(align.qname, target, clipped_pos, last_matched, cleavage_site, txt)
+    # determine if 3'UTR is first or last query block
+    anchor_read_strand = None
+    if clipped_pos == 'start':
+        anchor_read_strand = '-'
+    elif clipped_pos == 'end':
+        anchor_read_strand = '+'
+    
+    if anchor_read_strand is None:
+        return []
+    
+    # check if genomic region has polyA - if so, no good
+    genome_buffer = 200
+    if txt.strand == '-':
+        span = (int(cleavage_site) - genome_buffer, int(cleavage_site))
+    else:
+        span = (int(cleavage_site), int(cleavage_site) + genome_buffer)
+    #genome_seq = self.refseq.GetSequence(align.target, span[0], span[1])
+    genome_seq = refseq.fetch(target, span[0], span[1])
+    if re.search('A{%s,}' % (homo_len), genome_seq, re.IGNORECASE) or re.search('T{%s,}' % (homo_len), genome_seq, re.IGNORECASE):
+        sys.stdout.write('genome sequence has polyAT tract - no reliable link pairs can be retrieved %s %s %s:%s-%s\n' % 
+                         (align.query, cleavage_site, align.target, span[0], span[1]))
+        return []
+
+    mate_loc = {}
+    #for read in self.bam.bam.fetch(align.query):
+    print 'Looking at contg: {}'.format(align.qname)
+    f = open('./'+align.qname+'.reads','w')
+    cigarskip = 0
+    for read in r2c.fetch(align.qname):
+        f.write(read.qname+'\n')
+        # skip when both mates mapped to same contig
+        if not read.mate_is_unmapped and read.tid == read.rnext:
+            continue
+        
+        # anchor read must be mapped entirely within contig
+        if len(read.cigar) > 1:
+            cigarskip += 1
+            continue
+        
+        if anchor_read_strand == '+' and (read.is_reverse or read.pos + 1 > last_matched):
+            continue
+        if anchor_read_strand == '-' and (not read.is_reverse or read.pos + read.rlen < last_matched):
+            continue
+        
+        if read.rnext >= 0:
+            mate_contig = r2c.getrname(read.rnext)       
+            if not mate_loc.has_key(mate_contig):
+                mate_loc[mate_contig] = {}
+            mate_loc[mate_contig][read.qname] = read
+        else:
+            print 'cannot find unmapped mate %s' % read.qname
+            
+    print 'Skipped {} due to cigar > 1'.format(cigarskip)
+    print 'Done looking at reads'
+    link_pairs = []
+    f = open('./'+align.qname+'.contigs','w')
+    for contig in mate_loc.keys():
+        f.write(contig+'\n')
+        #for read in self.bam.bam.fetch(contig):
+        for read in r2c.fetch(contig):
+            if not mate_loc[contig].has_key(read.qname):
+                continue
+            
+            trimmed_seq = read.seq
+            if args.trim_reads:
+                trimmed_seq = trim_bases(read.seq, read.qual)
+
+            if trimmed_seq:
+                for base in ('A', 'T'):
+                    if is_bridge_read_good(trimmed_seq, base, len(trimmed_seq) - max_mismatch, mismatch=[max_mismatch, len(trimmed_seq)]):
+                        link_pairs.append([read, mate_loc[contig][read.qname], trimmed_seq])
+                        break
+    
+    return link_pairs
+
+def is_bridge_read_good(clipped_seq, base, min_len, mismatch):
+        """Determines if clipped sequence is possible polyA tail
+        
+        If clipped_seq is composed of base only, then it is automatically 
+        considered a potential bridge read regardless of length
+        Otherwise will check the frequecy of 'the other bases' using is_polyA_tail()
+        to determine whether it's acceptable
+        """
+        good = False
+        if clipped_seq[0].upper() == base and len(re.sub(r'(.)\1+', r'\1', clipped_seq)) == 1:
+            good = True
+        elif is_polyA_tail(clipped_seq, base, min_len=min_len, max_nonAT_allowed=mismatch):
+            good = True
+
+        return good
+
+def trim_bases(seq, qual, end=None):
+        """Trim poor quality bases from read sequence"""
+        if poor_quals is None or poor_quals == '':
+            return seq
+        
+        match_end = match_start = None
+        match_end = re.search(r'[%s]+$' % poor_quals, qual)            
+        match_start = re.search(r'^[%s]+' % poor_quals, qual)
+        
+        if match_start and not match_end:
+            if end is None or end == 'start':
+                return seq[match_start.end():]
+            
+        elif match_end and not match_start:
+            if end is None or end == 'end':
+                return seq[:match_end.start()]
+            
+        elif match_start and match_end:
+            if end == 'start':
+                return seq[match_start.end():]
+            
+            elif end == 'end':
+                return seq[:match_end.start()]
+            
+            else:
+                if len(match_start.group()) > len(match_end.group()):
+                    return seq[match_start.end():]
+                elif len(match_end.group()) > len(match_start.group()):
+                    return seq[:match_end.start()]
+        
+        return seq
+
 # Iterate contig to genome alignments
 for align in aligns:
     # Check if has polyA tail
@@ -242,6 +426,8 @@ for align in aligns:
         else:
             clipped_pos = 'start'
             last_matched = align.qstart
+    link_pairs = find_link_pairs(align, chrom, clipped_pos, last_matched, cleavage_site, utr3)
+    print link_pairs
     print '-'*50
 
 def cigarScore(cigar_string, start, end):
