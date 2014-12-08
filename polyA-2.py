@@ -31,7 +31,7 @@ parser.add_argument('-k', '--track', metavar=('[name]','[description]'), help='N
 parser.add_argument('--rgb', help='RGB value of BED graph. Default is 0,0,255', default='0,0,255')
 
 args = parser.parse_args()
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('polyA_logger')
 
 fh = logging.FileHandler('info.log')
@@ -39,6 +39,12 @@ fh.setLevel(logging.INFO)
 logger.addHandler(fh)
 
 # Globally used variables
+
+# Filters (filters)
+filters = {}
+filters['min_at'] = args.min_at
+filters['max_diff'] = args.max_diff
+filters['max_diff_link'] = args.max_diff_link
 
 # Reference genome sequence (refseq)
 if (args.ref_genome == 'hg19'):
@@ -222,22 +228,21 @@ def inferStrand(align, overlapping_features):
     for feat in overlapping_features:
         if (feat.feature == '3UTR'):
             if (i < half):
-                strand = '+'
-            else:
                 strand = '-'
+            else:
+                strand = '+'
             return strand
         elif (feat.feature == '5UTR'):
             if (i < half):
-                strand = '-'
-            else:
                 strand = '+'
+            else:
+                strand = '-'
             return strand
         else:
             return None
         i += 1
 
-
-def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, txt, homo_len=20, max_mismatch=0):
+def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, feature, homo_len=20, max_mismatch=0):
     """Finds reads pairs where one mate is mapped to contig and the other mate (mapped elsewhere or unmapped)
     is a potential polyA tail
     
@@ -251,7 +256,7 @@ def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, txt
     region of the cleavage site should be checked.  If a polyT or polyA is in the neighborhood (200bp), then the case
     won't be further explored.
     """
-    print '@{}\t{}\t{}\t{}\t{}\t{}'.format(align.qname, target, clipped_pos, last_matched, cleavage_site, txt)
+    print '@{}\t{}\t{}\t{}\t{}\t{}'.format(align.qname, target, clipped_pos, last_matched, cleavage_site, feature)
     # determine if 3'UTR is first or last query block
     anchor_read_strand = None
     if clipped_pos == 'start':
@@ -264,7 +269,7 @@ def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, txt
     
     # check if genomic region has polyA - if so, no good
     genome_buffer = 200
-    if txt.strand == '-':
+    if feature['feature'].strand == '-':
         span = (int(cleavage_site) - genome_buffer, int(cleavage_site))
     else:
         span = (int(cleavage_site), int(cleavage_site) + genome_buffer)
@@ -277,11 +282,9 @@ def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, txt
 
     mate_loc = {}
     #for read in self.bam.bam.fetch(align.query):
-    print 'Looking at contg: {}'.format(align.qname)
-    f = open('./'+align.qname+'.reads','w')
-    cigarskip = 0
+    cigarskip, anchor_rs_plus, anchor_rs_minus, read_count = 0,0,0,0
     for read in r2c.fetch(align.qname):
-        f.write(read.qname+'\n')
+        read_count += 1
         # skip when both mates mapped to same contig
         if not read.mate_is_unmapped and read.tid == read.rnext:
             continue
@@ -292,8 +295,10 @@ def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, txt
             continue
         
         if anchor_read_strand == '+' and (read.is_reverse or read.pos + 1 > last_matched):
+            anchor_rs_plus += 1
             continue
         if anchor_read_strand == '-' and (not read.is_reverse or read.pos + read.rlen < last_matched):
+            anchor_rs_minus += 1
             continue
         
         if read.rnext >= 0:
@@ -304,7 +309,10 @@ def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, txt
         else:
             print 'cannot find unmapped mate %s' % read.qname
             
-    print 'Skipped {} due to cigar > 1'.format(cigarskip)
+    print 'Total reads {}'.format(read_count)
+    print '\tSkipped {} due to cigar > 1'.format(cigarskip)
+    print '\tSkipped {} due to anchor read strand == +'.format(anchor_rs_plus)
+    print '\tSkipped {} due to anchor read strand == -'.format(anchor_rs_minus)
     print 'Done looking at reads'
     link_pairs = []
     f = open('./'+align.qname+'.contigs','w')
@@ -375,44 +383,10 @@ def trim_bases(seq, qual, end=None):
         
         return seq
 
-# Iterate contig to genome alignments
-for align in aligns:
-    # Check if has polyA tail
-    # ...
-    # Obtain reads spanning contig
-    chrom = aligns.getrname(align.tid)
-    print 'Looking at contig: {}-{}-{}'.format(align.qname, align.reference_start, align.reference_end)
-    read_count = 0
-    strand = '+' if align.is_reverse == True else '-'
-    
-    # Check both ends of contig for 3UTR
-    
-
-#   print 'blocks: {}'.format(align.blocks)
-#   print 'tblocks: {}'.format(cigarToBlocks(align.cigar, align.reference_start+1, strand)[0])
-#   print 'qblocks: {}'.format(cigarToBlocks(align.cigar, align.reference_start+1, strand)[1])
-#   print 'mqblocks: {}'.format(getQueryBlocks(align))
-    for overlapping_read in r2c.fetch(align.qname, align.qstart, align.qend):
-        read_count += 1
-    feats = features.fetch(chrom, align.reference_start, align.reference_end)
-    feature_list = []
-    for feat in feats:
-        feature_list.append(feat)
-    utr3 = None
-    for feature in feature_list:
-        if (feature.feature == '3UTR'):
-            if (utr3 is None):
-                utr3 = feature
-            elif (abs(feature.start - align.reference_start) < abs(utr3.start - align.reference_start)):
-                utr3 = feature
-        #print '\tFeature: {}\t{}\t{}\t{}'.format(feature.transcript_id,feature.feature,feature.start,feature.end)
-    print '\tutr3: {}\t{}\t{}\t{}'.format(utr3.transcript_id, utr3.feature, utr3.start, utr3.end)
-    inf_strand = inferStrand(align, feature_list)
-    if (inf_strand is None):
-        print 'Strand information could not be found nor inferred!'
-    if (inf_strand == '+'):
+def inferCleavageSite(align, inf_strand):
+    if (inf_strand == '-'):
         cleavage_site = align.reference_start
-        if (strand == '+'):
+        if (align.is_reverse == True):
             clipped_pos = 'start'
             last_matched = align.qstart
         else:
@@ -420,24 +394,88 @@ for align in aligns:
             last_matched = align.qend
     else:
         cleavage_site = align.reference_end
-        if (strand == '+'):
+        if (align.is_reverse == False):
             clipped_pos = 'end'
             last_matched = align.qend
         else:
             clipped_pos = 'start'
             last_matched = align.qstart
-    link_pairs = find_link_pairs(align, chrom, clipped_pos, last_matched, cleavage_site, utr3)
-    print link_pairs
-    print '-'*50
+    return [cleavage_site, clipped_pos, last_matched]
 
-def cigarScore(cigar_string, start, end):
-    cigar = re.findall('(\d+)(\D+)', cigar_string)
-    pos = 0
-    rval = []
-    for i in xrange(len(cigar)):
-        if (pos < start <= pos+int(cigar[i][0])):
-            rval.append(i)
-        if (pos < end <= pos+int(cigar[i][0])):
-            rval.append(i)
-        pos += int(cigar[i][0])
-    return rval
+def show_trimmed_bases(seq, trimmed_bases):
+    """Shows (link) read sequence with trimmed bases"""
+    match_start = re.search('^' + trimmed_bases, seq)
+    match_end = re.search(trimmed_bases + '$', seq)
+    
+    if match_start or match_end:
+        if match_start:
+            match = match_start
+        else:
+            match = match_end
+        return seq[:match.start()].lower() + seq[match.start():match.end()].upper() + seq[match.end():].lower()
+    
+    else:
+        return seq.lower()
+
+def output_link_pairs(align, reads):
+    """Outputs link pairs in FASTA format"""
+    out = ''
+    for r in reads:
+        trimmed_seq = show_trimmed_bases(r[0].seq, r[2])
+        num_trimmed_bases = r[0].rlen - len(r[2])
+        if r[1].is_reverse:
+            anchor_direction = 'L'
+        else:
+            anchor_direction = 'R'
+        if r[0].is_unmapped:
+            mate_contig = 'unmapped'
+        else:
+            mate_contig = r2c.getrname(r[0].tid)
+        out += '>%s %s %s %s %s trimmed:%s\n%s\n' % (r[0].qname, align.query, r[1].pos, anchor_direction, 
+                                                     mate_contig, num_trimmed_bases, trimmed_seq) 
+    return out
+
+# Iterate contig to genome alignments
+for align in aligns:
+    print 'Looking at contig: {}: {}-{}'.format(align.qname,align.reference_start, align.reference_end)
+    # Get chromosome
+    chrom = aligns.getrname(align.tid)
+    # Find all overlapping features in gtf annotation
+    feats = features.fetch(chrom, align.reference_start, align.reference_end)
+    feature_list = []
+    for feat in feats:
+        feature_list.append({'feature': feat})
+    # Try to get strandedness of alignment
+    if (align.is_reverse in [True, False]):
+        strand = '-' if align.is_reverse == True else '+'
+    inf_strand = inferStrand(align, [x['feature'] for x in feature_list])
+    if (strand is None) and (inf_strand is None):
+        print 'Strand information could not be found nor inferred! Skipping alignment!'
+        continue
+    cleavage_site, clipped_pos, last_matched = inferCleavageSite(align, inf_strand)
+    #read_count = 0
+    #for overlapping_read in r2c.fetch(align.qname, align.qstart, align.qend):
+        #read_count += 1
+    for feat in feature_list:
+        if (feat['feature'].strand == '+'):
+            annotated_end = feat['feature'].end
+        else:
+            annotated_end = feat['feature'].start
+        distance_from_end = annotated_end - cleavage_site
+        feat['distance_from_end'] = distance_from_end
+    print '\tcleavage site: {}'.format(cleavage_site)
+    utr3 = None
+    for feature in feature_list: 
+        if (feature['feature'].feature == '3UTR'):
+            if (utr3 is None):
+                utr3 = feature
+            elif (abs(feature['feature'].start - align.reference_start) < abs(utr3['feature'].start - align.reference_start)):
+                utr3 = feature
+        #print '\tFeature: {}\t{}\t{}\t{}\t{}'.format(feature['feature'].transcript_id,feature['feature'].feature,feature['feature'].start,feature['feature'].end, feature['feature'].strand)
+    print '\tutr3: {}\t{}\t{}\t{}\t{}'.format(utr3['feature'].transcript_id, utr3['feature'].feature, utr3['feature'].strand, utr3['feature'].start, utr3['feature'].end)
+    print '\t\tdistance from end: {}'.format(utr3['distance_from_end'])
+    lines_link = ''
+    link_pairs = find_link_pairs(align, chrom, clipped_pos, last_matched, cleavage_site, utr3)
+    if link_pairs and args.output_reads:
+        lines_link += output_link_pairs(align, link_pairs)
+    print '-'*50
