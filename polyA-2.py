@@ -1,6 +1,5 @@
 import argparse
 import logging
-import pickle
 import os
 import sys
 import re
@@ -8,8 +7,8 @@ import subprocess
 # External modules below
 import pysam
 # Custom modules below
-import mapping
-import transcript
+#import mapping
+#import transcript
 import pybedtools
 
 parser = argparse.ArgumentParser(description='this program tries to find polya cleavage sites through short-read assembly.it is expected that contigs are aligned to contigs, and reads aligned to contigs. these 2 alignment steps can be performed by trans-abyss. the aligners used are gmap for contig-genome and bwa-sw for read-contig alignments. annotations files for ensembl, knowngenes, refseq, and aceview are downloaded from ucsc. est data(optional) are also downloaded from ucsc. the analysis can be composed of 2 phases: 1. contig-centric phase - cleavage sites per contig are captured 2. coordinate-centric phase - contigs capturing the same cleavage site are consolidated into 1 report where expression/evidence-related data are summed. customized filtering based on evidence data can be performed.')
@@ -83,6 +82,15 @@ if args.trim_reads:
         if poor_qual is not None:
             poor_quals += poor_qual
 
+output_fields=['gene','transcript','transcript_strand','coding','contig','chromosome','cleavage_site','within_UTR','distance_from_annotated_site','ESTs','length_of_tail_in_contig','number_of_tail_reads','number_of_bridge_reads','max_bridge_read_tail_length','bridge_read_identities','tail+bridge_reads','number_of_link_pairs','max_link_pair_length','link_pair_identities']
+out_result = open(args.out, 'a')
+out_result.write('%s\n' % '\t'.join(output_fields))
+prefix = os.path.splitext(args.out)[0]
+out_bridge_reads_file = prefix + '-reads.fa'
+out_link_pairs_file = prefix + '-link.fa'
+out_bridge_reads = open(out_bridge_reads_file, 'a')
+out_link_pairs = open(out_link_pairs_file, 'a')
+
 def ucsc_chroms(genome):
     """Extracts conversion of UCSC chromosome names
     eg. hg19"""
@@ -102,18 +110,19 @@ chrom_proper = ucsc_chroms(args.ref_genome)
 
 def qpos_to_tpos(align, qpos):
     blocks = align.blocks
-    for i in xrange(len(blocks)):
-        qb0 = blocks[i][0]
-        qb1 = blocks[i][1]
+    qblocks = getQueryBlocks(align)
+    for i in xrange(len(qblocks)):
+        qb0 = qblocks[i][0]
+        qb1 = qblocks[i][1]
         if ((qpos >= qb0) and (qpos <= qb1)) or ((qpos <= qb0) and (qpos >= qb1)):
             block = i
             break
     tpos = None
     try:
         if (align.is_reverse == False):
-            tpos = blocks[block][0] + qpos - blocks[block][0]
+            tpos = blocks[block][0] + qpos - qblocks[block][0]
         else:
-            tpos = blocks[block][1] - (qpos - blocks[block][1])
+            tpos = blocks[block][1] - (qpos - qblocks[block][1])
     except NameError:
         pass
     return tpos
@@ -435,7 +444,7 @@ def output_link_pairs(align, reads):
                                                      mate_contig, num_trimmed_bases, trimmed_seq) 
     return out
 
-def annotate_cleavage_site(align, target, cleavage_site, clipped_pos, base, min_txt_match_percent=0.6):
+def annotate_cleavage_site(align, feature_list, target, cleavage_site, clipped_pos, base, min_txt_match_percent=0.6):
     """Finds transcript where proposed cleavage site makes most sense, and also fetches matching ESTs
 
     This method assesses whether the cleavage site makes sense with
@@ -479,6 +488,37 @@ def annotate_cleavage_site(align, target, cleavage_site, clipped_pos, base, min_
        (txt_strand == '-' and base == 'T'):     
         ests = []
         
+
+        txts_screened = feature_list
+        if txts_screened:
+            exact_txts = [x for x in txts_screened if x['identical'] == True]
+        if exact_txts:
+            txts_screened = exact_txts
+        
+        txts_screened.sort(key=lambda t: abs(t['distance_from_end']))
+        closest_txt = txts_screened[0]
+        if (txts_screened[0]['feature'].feature == '3UTR'):
+            within_utr = True
+        else:
+            within_utr = False
+
+        #if args.ext_overlap:
+            #if closest_txt.strand == '+'
+        
+        result = {
+                'ests': ests,
+                'txt': closest_txt,
+                'novel': not txts_screened[0]['identical'],
+                'within_utr': within_utr,
+                'coord': '%s:%d' % (target, cleavage_site),
+                'cleavage_site': cleavage_site,
+                'from_end': abs(txts_screened[0]['distance_from_end']),
+                'which_end': clipped_pos,
+                'base': base
+            }
+
+    return result
+
 #        txts_screened = get_txts_with_min_match(align, cleavage_site, txt_strand)      
 #        if txts_screened:
 #            ## discard transcripts if proposed cleavage site is before 3'UTR
@@ -520,9 +560,9 @@ def annotate_cleavage_site(align, target, cleavage_site, clipped_pos, base, min_
 #    else:
 #        print '%s : %s:%s clipped base(%s) does not match transcript strand(%s)' % (align.qname, target, cleavage_site, base, txt_strand)
         
-    return result
+    #return result
 
-def find_polyA_cleavage(align, target):
+def find_polyA_cleavage(align, target, feature_list):
         """Finds PolyA cleavage sites of a given aligned contig
         
         This method first checks if the given contig captures a polyA tail (find_tail_contig),
@@ -549,7 +589,10 @@ def find_polyA_cleavage(align, target):
             for event in tail[clipped_pos]:
                 # contig coordinate of cleavage site                
                 last_matched, cleavage_site, base, tail_seq, num_tail_reads, bridge_reads, bridge_clipped_seq = event
-                result = annotate_cleavage_site(align, target, cleavage_site, clipped_pos, base)
+                result = annotate_cleavage_site(align, feature_list, target, cleavage_site, clipped_pos, base)
+                #print '*'*25
+                #print 'result: {}'.format(result)
+                #print '*'*25
                 if result:
                     if bridge_reads:
                         result['num_bridge_reads'] = len(bridge_reads)
@@ -766,6 +809,7 @@ def filter_vs_reference(align, target, clipped_reads):
             os.remove(ff)
 
 def find_bridge_reads(align, target, min_len, mismatch, genome_buffer=1000, tail=None):
+    #print "Running find_bridge_reads"
     """Finds bridge reads
     
     It first checks to see clipped reads if the entire clipped portion is A's or T's.
@@ -867,12 +911,14 @@ def find_bridge_reads(align, target, min_len, mismatch, genome_buffer=1000, tail
                 cleavage_site = tail[clipped_pos][i][1]
                 tail_search[clipped_pos][cleavage_site] = i
                             
-    for clipped_pos in clipped_reads.keys():
-        if not results.has_key(clipped_pos):
+    #print 'clipped_reads: {}'.format(clipped_reads)
+    for clipped_pos in clipped_reads:
+        if clipped_pos not in results:
             results[clipped_pos] = []
-        for pos in clipped_reads[clipped_pos].keys():                       
+        for pos in clipped_reads[clipped_pos]:                       
             for base in clipped_reads[clipped_pos][pos]:
                 pos_genome = clipped_reads[clipped_pos][pos][base][0][2]
+                #print 'pos_genome: {}'.format(pos_genome)
                 
                 if pos_genome is not None:
                     if tail_search is not None and tail_search[clipped_pos].has_key(pos_genome):
@@ -1119,7 +1165,7 @@ def extract_transcript_seq(align, target, out_file):
             empty = False
             transcripts[feature.transcript_id] += refseq.fetch(chrom, feature.start, feature.end).upper()
     for tid in transcripts:
-        print "transcript_seq: {}".format(transcripts[tid])
+        #print "transcript_seq: {}".format(transcripts[tid])
         out.write('>%s\n%s\n' % (tid, transcripts[tid]))
     out.close()
     
@@ -1215,21 +1261,21 @@ def align_genome_seq(align, target, query_seqs, coord, label, parse_fn):
             
     return result
 
-def output_result(self, align, result, link_pairs=[]):
+def output_result(align, result, chrom, link_pairs=[]):
     """Outputs main results in tab-delimited format
     
     The output fields are specified in class variable 'output_fields'
     """
     data = {}
-    data['contig'] = align.query
+    data['contig'] = align.qname
     
-    data['transcript'] = result['txt'].name
-    data['transcript_strand'] = result['txt'].strand
-    data['chromosome'] = result['txt'].chrom
-    if result['txt'].alias:
-        data['gene'] = result['txt'].alias
+    data['transcript'] = result['txt']['feature'].transcript_id
+    data['transcript_strand'] = result['txt']['feature'].strand
+    data['chromosome'] = chrom
+    if result['txt']['feature'].gene_id:
+        data['gene'] = result['txt']['feature'].gene_id
         
-    coding_type = result['txt'].coding_type()
+    coding_type = result['txt']['coding_type']
     if coding_type == 'CODING':
         data['coding'] = 'yes'
     elif coding_type == 'NONCODING':
@@ -1242,7 +1288,7 @@ def output_result(self, align, result, link_pairs=[]):
     else:
         data['within_UTR'] = 'no'
         
-    data['chrom'] = result['txt'].chrom
+    data['chrom'] = chrom
     data['cleavage_site'] = result['cleavage_site']
     data['distance_from_annotated_site'] = result['from_end']
     
@@ -1287,7 +1333,7 @@ def output_result(self, align, result, link_pairs=[]):
         data['tail+bridge_reads'] += data['number_of_bridge_reads']
         
     cols = []
-    for field in self.output_fields:
+    for field in output_fields:
         if data.has_key(field):
             cols.append(str(data[field]))
         else:
@@ -1297,6 +1343,27 @@ def output_result(self, align, result, link_pairs=[]):
     return result
 
 
+
+def output(report_lines, bridge_lines=None, link_lines=None):
+    """Writes output lines to files"""      
+    if out_result is not None and report_lines:
+        for line in report_lines:
+            out_result.write(line)
+    out_result.close()
+            
+    if bridge_lines and out_bridge_reads is not None:
+        for line in bridge_lines:
+            out_bridge_reads.write(line)
+    if out_bridge_reads is not None:
+        out_bridge_reads.close()
+        
+    if link_lines and out_link_pairs is not None:
+        for line in link_lines:
+            out_link_pairs.write(line)
+    if out_link_pairs is not None:
+        out_link_pairs.close()
+
+lines_result = lines_bridge = lines_link = ''
 # Iterate contig to genome alignments
 for align in aligns:
     print 'Looking at contig: {}: {}-{}'.format(align.qname,align.reference_start, align.reference_end)
@@ -1307,8 +1374,11 @@ for align in aligns:
     # Find all overlapping features in gtf annotation
     feats = features.fetch(chrom, align.reference_start, align.reference_end)
     feature_list = []
+    coding_type = False
     for feat in feats:
-        feature_list.append({'feature': feat})
+        if (feat.feature == 'exon'):
+            coding_type = True
+        feature_list.append({'feature': feat, 'coding_type': coding_type})
     # Try to get strandedness of alignment
     if (align.is_reverse in [True, False]):
         strand = '-' if align.is_reverse == True else '+'
@@ -1324,32 +1394,42 @@ for align in aligns:
             annotated_end = feat['feature'].start
         distance_from_end = annotated_end - cleavage_site
         feat['distance_from_end'] = distance_from_end
+        feat['identical'] = False
+        if ((feat['feature'].strand == '+') and (feat['feature'].end == cleavage_site-1)) or ((feat['feature'].strand == '-') and (feat['feature'].start == cleavage_site-1)):
+            feat['identical'] = True
     #print '\tcleavage site: {}'.format(cleavage_site)
     utr3 = None
+    within_utr = False
     for feature in feature_list: 
         if (feature['feature'].feature == '3UTR'):
+            within_utr = True
             if (utr3 is None):
                 utr3 = feature
             elif (abs(feature['feature'].start - align.reference_start) < abs(utr3['feature'].start - align.reference_start)):
                 utr3 = feature
         #print '\tFeature: {}\t{}\t{}\t{}\t{}'.format(feature['feature'].transcript_id,feature['feature'].feature,feature['feature'].start,feature['feature'].end, feature['feature'].strand)
-    #print '\tutr3: {}\t{}\t{}\t{}\t{}'.format(utr3['feature'].transcript_id, utr3['feature'].feature, utr3['feature'].strand, utr3['feature'].start, utr3['feature'].end)
+    utr3['coding_type'] = coding_type
+    utr3['within_utr'] = True
+    utr3['chrom'] = chrom
+    print '\tutr3: {}\t{}\t{}\t{}\t{}'.format(utr3['feature'].transcript_id, utr3['feature'].feature, utr3['feature'].strand, utr3['feature'].start, utr3['feature'].end)
     #print '\t\tdistance from end: {}'.format(utr3['distance_from_end'])
-    lines_link = ''
+    result_link = {'clipped_pos': clipped_pos, 'txt': utr3, 'cleavage_site': cleavage_site, 'from_end': utr3['distance_from_end'], 'tail_seq': None, 'within_utr': within_utr, 'novel': True, 'coord': '{}:{}'.format(chrom, cleavage_site), 'last_matched': last_matched, 'ests': []}
+    #print result_link
     link_pairs = find_link_pairs(align, chrom, clipped_pos, last_matched, cleavage_site, utr3)
     if link_pairs and args.output_reads:
         lines_link += output_link_pairs(align, link_pairs)
-    results = find_polyA_cleavage(align,chrom)
-    print '-'*50
+    results = find_polyA_cleavage(align, chrom, feature_list)
+    #print 'results: {}'.format(results)
+    #print '-'*50
     if results:
         for result in results:
-            lines_result += output_result(align, result, link_pairs=link_pairs)
+            lines_result += output_result(align, result, chrom, link_pairs=link_pairs)
             
-            if options.output_reads and result.has_key('bridge_reads') and result['bridge_reads']:
+            if args.output_reads and result.has_key('bridge_reads') and result['bridge_reads']:
                 lines_bridge += output_bridge_reads(align, result)
                 
     elif result_link is not None:
-        lines_result += output_result(align, result_link, link_pairs=link_pairs)
+        lines_result += output_result(align, result_link, chrom, link_pairs=link_pairs)
               
 # close output streams
-pf.output(lines_result, lines_bridge, lines_link)
+output(lines_result, lines_bridge, lines_link)
