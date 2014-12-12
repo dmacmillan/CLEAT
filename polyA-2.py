@@ -6,10 +6,6 @@ import re
 import subprocess
 # External modules below
 import pysam
-# Custom modules below
-#import mapping
-#import transcript
-import pybedtools
 
 parser = argparse.ArgumentParser(description='this program tries to find polya cleavage sites through short-read assembly.it is expected that contigs are aligned to contigs, and reads aligned to contigs. these 2 alignment steps can be performed by trans-abyss. the aligners used are gmap for contig-genome and bwa-sw for read-contig alignments. annotations files for ensembl, knowngenes, refseq, and aceview are downloaded from ucsc. est data(optional) are also downloaded from ucsc. the analysis can be composed of 2 phases: 1. contig-centric phase - cleavage sites per contig are captured 2. coordinate-centric phase - contigs capturing the same cleavage site are consolidated into 1 report where expression/evidence-related data are summed. customized filtering based on evidence data can be performed.')
 parser.add_argument('c2g', metavar='<contig-to-genome>', help='the contig-to-genome alignment file in bam format')
