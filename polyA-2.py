@@ -110,24 +110,24 @@ def ucsc_chroms(genome):
 # chrom_proper
 chrom_proper = ucsc_chroms(args.ref_genome)
 
-def qpos_to_tpos(align, qpos, qblocks):
+def qpos_to_tpos(a, qpos):
     blocks = align.blocks
     if align.is_reverse:
         strand = '-'
     else:
         strand = '+'
-    for i in xrange(len(qblocks)):
-        qb0 = qblocks[i][0]
-        qb1 = qblocks[i][1]
+    for i in xrange(len(a['qblocks'])):
+        qb0 = a['qblocks'][i][0]
+        qb1 = a['qblocks'][i][1]
         if ((qpos >= qb0) and (qpos <= qb1)) or ((qpos <= qb0) and (qpos >= qb1)):
             block = i
             break
     tpos = None
     try:
-        if (align.is_reverse == False):
-            tpos = blocks[block][0] + qpos - qblocks[block][0]
+        if (a['strand'] == '+'):
+            tpos = blocks[block][0] + qpos - a['qblocks'][block][0]
         else:
-            tpos = blocks[block][1] - (qpos - qblocks[block][1])
+            tpos = blocks[block][1] - (qpos - a['qblocks'][block][1])
     except NameError:
         pass
     return tpos
@@ -259,7 +259,7 @@ def inferStrand(align, overlapping_features):
             return None
         i += 1
 
-def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, feature, homo_len=20, max_mismatch=0):
+def find_link_pairs(a, utr3, homo_len=20, max_mismatch=0):
     global link_pairs_total
     """Finds reads pairs where one mate is mapped to contig and the other mate (mapped elsewhere or unmapped)
     is a potential polyA tail
@@ -276,9 +276,9 @@ def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, fea
     """
     # determine if 3'UTR is first or last query block
     anchor_read_strand = None
-    if clipped_pos == 'start':
+    if utr3['clipped_pos'] == 'start':
         anchor_read_strand = '-'
-    elif clipped_pos == 'end':
+    elif utr3['clipped_pos'] == 'end':
         anchor_read_strand = '+'
     
     if anchor_read_strand is None:
@@ -286,21 +286,21 @@ def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, fea
     
     # check if genomic region has polyA - if so, no good
     genome_buffer = 200
-    if feature['feature'].strand == '-':
-        span = (int(cleavage_site) - genome_buffer, int(cleavage_site))
+    if utr3['feature'].strand == '-':
+        span = (int(utr3['cleavage_site']) - genome_buffer, int(utr3['cleavage_site']))
     else:
-        span = (int(cleavage_site), int(cleavage_site) + genome_buffer)
+        span = (int(utr3['cleavage_site']), int(utr3['cleavage_site']) + genome_buffer)
     #genome_seq = self.refseq.GetSequence(align.target, span[0], span[1])
-    genome_seq = refseq.fetch(target, span[0], span[1])
+    genome_seq = refseq.fetch(a['target'], span[0], span[1])
     if re.search('A{%s,}' % (homo_len), genome_seq, re.IGNORECASE) or re.search('T{%s,}' % (homo_len), genome_seq, re.IGNORECASE):
         sys.stdout.write('genome sequence has polyAT tract - no reliable link pairs can be retrieved %s %s %s:%s-%s\n' % 
-                         (align.query_sequence, cleavage_site, align.target, span[0], span[1]))
+                         (a['contig_seq'], utr3['cleavage_site'], a['target'], span[0], span[1]))
         return []
 
     mate_loc = {}
     #for read in self.bam.bam.fetch(align.query):
     cigarskip, anchor_rs_plus, anchor_rs_minus, read_count = 0,0,0,0
-    for read in r2c.fetch(align.qname):
+    for read in r2c.fetch(a['align'].qname):
         read_count += 1
         # skip when both mates mapped to same contig
         if not read.mate_is_unmapped and read.tid == read.rnext:
@@ -311,10 +311,10 @@ def find_link_pairs(align, target, clipped_pos, last_matched, cleavage_site, fea
             cigarskip += 1
             continue
         
-        if anchor_read_strand == '+' and (read.is_reverse or read.pos + 1 > last_matched):
+        if anchor_read_strand == '+' and (read.is_reverse or read.pos + 1 > utr3['last_matched']):
             anchor_rs_plus += 1
             continue
-        if anchor_read_strand == '-' and (not read.is_reverse or read.pos + read.rlen < last_matched):
+        if anchor_read_strand == '-' and (not read.is_reverse or read.pos + read.rlen < utr3['last_matched']):
             anchor_rs_minus += 1
             continue
         
@@ -400,25 +400,6 @@ def trim_bases(seq, qual, end=None):
         
         return seq
 
-def inferCleavageSite(align, inf_strand):
-    if (inf_strand == '-'):
-        cleavage_site = align.reference_start
-        if (align.is_reverse == True):
-            clipped_pos = 'start'
-            last_matched = align.qstart
-        else:
-            clipped_pos = 'end'
-            last_matched = align.qend
-    else:
-        cleavage_site = align.reference_end
-        if (align.is_reverse == False):
-            clipped_pos = 'end'
-            last_matched = align.qend
-        else:
-            clipped_pos = 'start'
-            last_matched = align.qstart
-    return [cleavage_site, clipped_pos, last_matched]
-
 def show_trimmed_bases(seq, trimmed_bases):
     """Shows (link) read sequence with trimmed bases"""
     match_start = re.search('^' + trimmed_bases, seq)
@@ -452,7 +433,7 @@ def output_link_pairs(align, reads):
                                                      mate_contig, num_trimmed_bases, trimmed_seq) 
     return out
 
-def annotate_cleavage_site(align, feature_list, target, cleavage_site, clipped_pos, base, min_txt_match_percent=0.6):
+def annotate_cleavage_site(a, feature_list, cleavage_site, clipped_pos, base, min_txt_match_percent=0.6):
     """Finds transcript where proposed cleavage site makes most sense, and also fetches matching ESTs
 
     This method assesses whether the cleavage site makes sense with
@@ -478,16 +459,16 @@ def annotate_cleavage_site(align, feature_list, target, cleavage_site, clipped_p
     """     
     result = None
     
-    chrom = proper_chrom(target, chrom_proper=chrom_proper)
+    chrom = proper_chrom(a['target'], chrom_proper=chrom_proper)
     
     # determine which transcript strand can the cleavage site come from
     if clipped_pos == 'start':
-        if align.is_reverse == False:
+        if a['strand'] == '+':
             txt_strand = '-'
         else:
             txt_strand = '+'
     else:
-        if align.is_reverse == False:
+        if a['strand'] == '+':
             txt_strand = '+'
         else:
             txt_strand = '-'
@@ -506,22 +487,15 @@ def annotate_cleavage_site(align, feature_list, target, cleavage_site, clipped_p
         
         txts_screened.sort(key=lambda t: abs(t['distance_from_end']))
         closest_txt = txts_screened[0]
-        if (txts_screened[0]['feature'].feature == '3UTR'):
-            within_utr = True
-        else:
-            within_utr = False
 
-        #if args.ext_overlap:
-            #if closest_txt.strand == '+'
-        
         result = {
                 'ests': ests,
                 'txt': closest_txt,
                 'novel': not txts_screened[0]['identical'],
-                'within_utr': within_utr,
-                'coord': '%s:%d' % (target, cleavage_site),
+                'within_utr': closest_txt['within_utr'],
+                'coord': '%s:%d' % (a['target'], cleavage_site),
                 'cleavage_site': cleavage_site,
-                'from_end': abs(txts_screened[0]['distance_from_end']),
+                'from_end': abs(closest_txt['distance_from_end']),
                 'which_end': clipped_pos,
                 'base': base
             }
@@ -571,7 +545,7 @@ def annotate_cleavage_site(align, feature_list, target, cleavage_site, clipped_p
         
     #return result
 
-def find_polyA_cleavage(align, target, feature_list, qblocks):
+def find_polyA_cleavage(a, feature_list):
     """Finds PolyA cleavage sites of a given aligned contig
     
     This method first checks if the given contig captures a polyA tail (find_tail_contig),
@@ -590,13 +564,13 @@ def find_polyA_cleavage(align, target, feature_list, qblocks):
     mismatch = [1, 1]
     if filters and filters.has_key('max_diff'):
         mismatch = filters['max_diff']
-    tail = find_bridge_reads(align, target, qblocks, min_len, mismatch, tail=find_tail_contig(align, target, qblocks, min_len, mismatch))
+    tail = find_bridge_reads(a, min_len, mismatch, tail=find_tail_contig(a, min_len, mismatch))
     results = []
     for clipped_pos in tail.keys():
         for event in tail[clipped_pos]:
             # contig coordinate of cleavage site                
             last_matched, cleavage_site, base, tail_seq, num_tail_reads, bridge_reads, bridge_clipped_seq = event
-            result = annotate_cleavage_site(align, feature_list, target, cleavage_site, clipped_pos, base)
+            result = annotate_cleavage_site(a, feature_list, cleavage_site, clipped_pos, base)
             #print '*'*25
             #print 'result: {}'.format(result)
             #print '*'*25
@@ -613,7 +587,7 @@ def find_polyA_cleavage(align, target, feature_list, qblocks):
                 results.append(result)
     return results
 
-def find_extended_bridge_reads(align, target, reads_to_screen, min_len, mismatch, genome_buffer=1000):
+def find_extended_bridge_reads(a, reads_to_screen, min_len, mismatch, genome_buffer=1000):
     global bridge_total
     """Finds bridge reads where only ending portion represent polyA tail"""
     query_seqs = {}
@@ -626,14 +600,14 @@ def find_extended_bridge_reads(align, target, reads_to_screen, min_len, mismatch
     clipped_reads = {'start':{}, 'end':{}}
     for clipped_pos, reads in reads_to_screen.iteritems():
         if reads:
-            if (clipped_pos == 'start' and align.is_reverse == False) or\
-               (clipped_pos == 'end' and align.is_reverse == True):
-                target_coord = [int(align.reference_start) - genome_buffer, int(align.reference_end)]
+            if (clipped_pos == 'start' and a['strand'] == '+') or\
+               (clipped_pos == 'end' and a['strand'] == '-'):
+                target_coord = [int(a['align'].reference_start) - genome_buffer, int(a['align'].reference_end)]
             else:
-                target_coord = [int(align.reference_start), int(align.reference_end) + genome_buffer]
+                target_coord = [int(a['align'].reference_start), int(a['align'].reference_end) + genome_buffer]
             
             query_seqs = dict((read.qname, read.seq) for read in reads) #if not entirely_mapped.has_key(read.qname))
-            partial_aligns = align_genome_seq(align, target, query_seqs, target_coord, 'extended-bridge-genome', get_partial_blat_aln)
+            partial_aligns = align_genome_seq(a, query_seqs, target_coord, 'extended-bridge-genome', get_partial_blat_aln)
             
             read_objs = dict((read.qname, read) for read in reads)
             
@@ -648,7 +622,7 @@ def find_extended_bridge_reads(align, target, reads_to_screen, min_len, mismatch
                                         
                 # reverse complement to be in agreement with reference instead of contig
                 clipped_seq_genome = clipped_seq
-                if align.is_reverse == True:
+                if a['strand'] == '-':
                     clipped_seq_genome = revComp(clipped_seq)
                     
                 if mapped_coord[0] == 0:
@@ -821,7 +795,7 @@ def filter_vs_reference(align, target, clipped_reads):
             #print 'cleanup', ff
             os.remove(ff)
 
-def find_bridge_reads(align, target, qblocks, min_len, mismatch, genome_buffer=1000, tail=None):
+def find_bridge_reads(a, min_len, mismatch, genome_buffer=1000, tail=None):
     global bridge_total
     #print "Running find_bridge_reads"
     """Finds bridge reads
@@ -832,12 +806,12 @@ def find_bridge_reads(align, target, qblocks, min_len, mismatch, genome_buffer=1
     The 2 results will be merged together.
     """
     # used for check if read is mapped to the aligned portion of the contig
-    query_bounds = sorted([int(align.qstart), int(align.qend)])
+    query_bounds = sorted([int(a['qstart']), int(a['qend'])])
     
     # identify clipped reads that are potential pA/pT
     clipped_reads = {'start':{}, 'end':{}}
     second_round = {'start':[], 'end':[]}
-    for read in r2c.fetch(align.qname):
+    for read in r2c.fetch(a['align'].qname):
     #for read in self.bam.bam.fetch(align.query):
         if not read.cigar or len(read.cigar) != 2:
             continue
@@ -888,12 +862,12 @@ def find_bridge_reads(align, target, qblocks, min_len, mismatch, genome_buffer=1
             
             # reverse complement to be in agreement with reference instead of contig
             clipped_seq_genome = clipped_seq
-            if align.is_reverse == True:
+            if a['strand'] == '-':
                 clipped_seq_genome = revComp(clipped_seq)
             
             # check for possible tail (stretch of A's or T's)
             #pos_genome = align.qpos_to_tpos(last_matched)
-            pos_genome = qpos_to_tpos(align, last_matched, qblocks)
+            pos_genome = qpos_to_tpos(a, last_matched)
             picked = False
             for base in ('A', 'T'):
                 if is_bridge_read_good(clipped_seq_genome, base, min_len, mismatch):
@@ -908,7 +882,7 @@ def find_bridge_reads(align, target, qblocks, min_len, mismatch, genome_buffer=1
             if not picked:
                 second_round[clipped_pos].append(read)
                     
-    extended_clipped_reads = find_extended_bridge_reads(align, target, second_round, min_len, mismatch)
+    extended_clipped_reads = find_extended_bridge_reads(a, second_round, min_len, mismatch)
     merge_clipped_reads(clipped_reads, extended_clipped_reads)
                 
     # filter events against reference sequence
@@ -1009,37 +983,35 @@ def get_num_tail_reads(align, last_matched):
     
     return num
 
-def find_tail_contig(align, target, qblocks, min_len, mismatch):
+def find_tail_contig(a, min_len, mismatch):
     global basic_total
     """Finds contigs that have polyA tail reconstructed"""
     # size of stretch of contig sequence to be added to polyA tail
     # against trasncript sequences to see it polyA tail is genomic
-    qstart = min(qblocks[0][0], qblocks[0][1], qblocks[-1][0], qblocks[-1][1])
-    qend = max(qblocks[0][0], qblocks[0][1], qblocks[-1][0], qblocks[-1][1])
     junction_buffer=50
     results = {}
     
     clipped = {'start':False, 'end':False}
-    if int(qstart) > 1:
+    if int(a['qstart']) > 1:
         clipped['start'] = True
         
-    if int(qend) < int(align.query_length):
+    if int(a['qend']) < int(a['align'].query_length):
         clipped['end'] = True
         
     for clipped_pos in ('start', 'end'):
         if clipped[clipped_pos]:
             if clipped_pos == 'start':
-                last_matched = int(qstart)
-                clipped_seq = align.query_sequence[:int(qstart)-1]
-                junction_seq = align.query_sequence[:int(qstart) - 1 + junction_buffer]
+                last_matched = int(a['qstart'])
+                clipped_seq = a['contig_seq'][:int(a['qstart'])-1]
+                junction_seq = a['contig_seq'][:int(a['qstart']) - 1 + junction_buffer]
             else:
-                last_matched = int(qend)
-                clipped_seq = align.query_sequence[int(qend):]
-                junction_seq = align.query_sequence[int(qend) - junction_buffer:]
+                last_matched = int(a['qend'])
+                clipped_seq = a['contig_seq'][int(a['qend']):]
+                junction_seq = a['contig_seq'][int(a['qend']) - junction_buffer:]
                                     
-            cleavage_site = qpos_to_tpos(align, last_matched, qblocks)
+            cleavage_site = qpos_to_tpos(a, last_matched)
             clipped_seq_genome = clipped_seq
-            if align.is_reverse == True:
+            if a['strand'] == '-':
                 clipped_seq_genome = revComp(clipped_seq)
             
             matched_transcript = in_homopolymer = False
@@ -1054,7 +1026,7 @@ def find_tail_contig(align, target, qblocks, min_len, mismatch):
                 if perfect or imperfect:
                     basic_total += 1
                     # don't need to do the following 2 checks if it's not a potential tail
-                    if len(clipped_seq) == 1 and in_homopolymer_neighbor(target, cleavage_site, clipped_seq_genome, clipped_seq[0]):
+                    if len(clipped_seq) == 1 and in_homopolymer_neighbor(a['target'], cleavage_site, clipped_seq_genome, clipped_seq[0]):
 #                        print '%s : clipped seq in middle of homopolyer run (%s) %s' % (align.qname, clipped_pos, clipped_seq)
                         in_homopolymer = True
                         continue
@@ -1219,7 +1191,7 @@ def get_partial_blat_aln(aln_file):
         
     return partially_aligned
 
-def align_genome_seq(align, target, query_seqs, coord, label, parse_fn):
+def align_genome_seq(a, query_seqs, coord, label, parse_fn):
     """Aligns(BLAT) query sequences to genomic sequence of given coordinate
     
     Query sequences is given in a hash (query_seq) where
@@ -1243,16 +1215,16 @@ def align_genome_seq(align, target, query_seqs, coord, label, parse_fn):
         path = os.path.dirname(os.path.abspath(args.out))
     
     # create genome reference file for Blatting
-    target_file = '%s/%s-genome-%s.fa' % (path, align.qname, label)
+    target_file = '%s/%s-genome-%s.fa' % (path, a['align'].qname, label)
     if os.path.exists(target_file):
         os.remove(target_file)
     out = open(target_file, 'w')
-    out.write('>%s:%d-%d\n%s\n' % (target, coord[0], coord[1], target_seq))
+    out.write('>%s:%d-%d\n%s\n' % (a['target'], coord[0], coord[1], target_seq))
     out.close()
     tmp_files.append(target_file)
 
     # create query for Blatting
-    query_file = '%s/%s-query-%s.fa' % (path, align.qname, label)
+    query_file = '%s/%s-query-%s.fa' % (path, a['align'].qname, label)
     if os.path.exists(query_file):
         os.remove(query_file)
     out = open(query_file, 'w')
@@ -1262,7 +1234,7 @@ def align_genome_seq(align, target, query_seqs, coord, label, parse_fn):
     tmp_files.append(query_file)
 
     # align query against target
-    aln_file = '%s/%s-%s.psl' % (path, align.qname, label)
+    aln_file = '%s/%s-%s.psl' % (path, a['align'].qname, label)
     if os.path.exists(aln_file):
         os.remove(aln_file)
     tmp_files.append(aln_file)
@@ -1384,11 +1356,50 @@ def output(report_lines, bridge_lines=None, link_lines=None):
     if out_link_pairs is not None:
         out_link_pairs.close()
 
+def fetchUtr3(alignd, features):
+    utr3 = None
+    for f in features:
+        f['identical'] = False
+        f['within_utr'] = False
+        if (alignd['strand'] == '+'):
+            f['clipped_pos'] = 'start'
+            # Feature is exactly the 3UTR
+            if (f['feature'].end == alignd['align'].reference_end) or (f['feature'].feature == '3UTR'):
+                f['identical'] = f['within_utr'] = True
+                f['distance_from_end'] = 0
+                utr3 = f
+            # Feature overlaps the 3UTR
+            elif ((f['feature'].start+1) <= alignd['align'].reference_end < f['feature'].end):
+                f['within_utr'] = True
+                utr3 = f
+            f['distance_from_end'] = f['feature'].end - alignd['align'].reference_start
+        elif (alignd['strand'] == '-'):
+            f['clipped_pos'] = 'end'
+            # Feature is exactly the 3UTR
+            if ((f['feature'].start+1) == alignd['align'].reference_start) or (f['feature'].feature == '3UTR'):
+                f['identical'] = f['within_utr'] = True
+                f['distance_from_end'] = 0
+                utr3 = f
+            # Feature overlaps the 3UTR
+            elif ((f['feature'].start+1) < alignd['align'].reference_start <= f['feature'].end):
+                f['within_utr'] = True
+                utr3 = f
+            f['distance_from_end'] = f['feature'].start - alignd['align'].reference_end
+    return utr3
+
 lines_result = lines_bridge = lines_link = ''
+i=0
 for align in aligns:
+    if i == 5:
+        sys.exit()
+    #sys.stdout.write('\rProcessing alignment {}'.format(i))
+    i+=1
     a = {'align': align}
     a['contig_seq'] = contigs.fetch(align.query_name)
-    a['strand'] = '-' if align.is_reverse else '+'
+    if (align.is_reverse in [True, False]):
+        a['strand'] = '-' if align.is_reverse else '+'
+    else:
+        a['strand'] = None
     print 'Looking at contig: {}: {}-{}'.format(align.qname,align.reference_start, align.reference_end)
     if (align.reference_start == None) or (align.reference_end == None):
         continue
@@ -1403,75 +1414,71 @@ for align in aligns:
     feature_list = []
     coding_type = False
     # Try to get strandedness of alignment
-    if (align.is_reverse in [True, False]):
-        a['strand'] = '-' if align.is_reverse == True else '+'
     for feat in feats:
         r = {'feature': feat}
         if (feat.strand != a['strand']):
             continue
         if (feat.feature != 'intron'):
             r['coding_type'] = True
-        if (feat.strand == '+'):
-            annotated_end = feat.end
-        else:
-            annotated_end = feat.start
-        r['distance_from_end'] = annotated_end - a['cleavage_site']
+        if (feat.feature == 'start_codon'):
+            a['cstart'] = feat.start
+        elif (feat.feature == 'end_codon'):
+            a['cend'] = feat.end
         feature_list.append(r)
-    # Try to get strandedness of alignment
+    for f in feature_list:
+        print '\tFeature: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(f['feature'].gene_id,f['feature'].transcript_id,f['feature'].feature,f['feature'].start,f['feature'].end, f['feature'].strand)
+    # Get the cleavage sites, clipped positions, and last matched for each feature
     a['inf_strand'] = inferStrand(align, [x['feature'] for x in feature_list])
-    if not a['strand']:
+    if (not a['strand']):
         a['strand'] = a['inf_strand']
-        a['cleavage_site'], a['clipped_pos'], a['last_matched'] = inferCleavageSite(align, a['inf_strand'])
-    else:
-        a['cleavage_site'], a['clipped_pos'], a['last_matched'] = inferCleavageSite(align, a['strand'])
+    if (a['strand'] is None) and (a['inf_strand'] is None):
+        continue
     # Get query blocks
     a['qblocks'] = cigarToBlocks(align.cigar, align.reference_start, a['strand'])[1]
     if a['qblocks'] == None:
         continue
-    if (a['strand'] is None) and (a['inf_strand'] is None):
-        continue
-    print a
-    sys.exit()
-    utr3 = None
+    a['qstart'] = min(a['qblocks'][0][0], a['qblocks'][0][1], a['qblocks'][-1][0], a['qblocks'][-1][1])
+    a['qend'] = max(a['qblocks'][0][0], a['qblocks'][0][1], a['qblocks'][-1][0], a['qblocks'][-1][1])
+    # Print alignment into
+#    print '  cigarstring: {}'.format(align.cigarstring)
+    print '  strand: {}'.format(a['strand'])
+#    print '  qstart: {}'.format(a['qblocks'][0][0])
+#    print '  qend: {}'.format(a['qblocks'][-1][1])
+    utr3 = fetchUtr3(a, feature_list)
     result_link = link_pairs = None
     # Find feature closest to 3UTR
-    for feature in feature_list: 
-        if (((feature['feature'].strand == '+') and (feature['feature'].end == a['cleavage_site'])) or ((feature['feature'].strand == '-') and ((feature['feature'].start + 1) == a['cleavage_site']))):
-            feature['within_utr'] = True
-            feature['identical'] = True
-            feature['distance_from_end'] = 0
-        else:
-            feature['within_utr'] = False
-            feature['identical'] = False
-            if (utr3 is None):
-                utr3 = feature
-            elif (abs(feature['feature'].start - align.reference_start) < abs(utr3['feature'].start - align.reference_start)):
-                utr3 = feature
-        print '\tFeature: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(feature['feature'].gene_id,feature['feature'].transcript_id,feature['feature'].feature,feature['feature'].start,feature['feature'].end, feature['feature'].strand)
     if utr3:
-       utr3['coding_type'] = coding_type
-       utr3['within_utr'] = True
-       utr3['chrom'] = chrom
-       result_link = {'clipped_pos': clipped_pos, 'txt': utr3, 'cleavage_site': cleavage_site, 'from_end': utr3['distance_from_end'], 'tail_seq': None, 'within_utr': within_utr, 'novel': True, 'coord': '{}:{}'.format(chrom, cleavage_site), 'last_matched': last_matched, 'ests': []}
+        print '\t{}'.format(utr3)
+        print '\tutr3: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(utr3['feature'].gene_id,utr3['feature'].transcript_id,utr3['feature'].feature,utr3['feature'].start,utr3['feature'].end, utr3['feature'].strand)
+        if (utr3['feature'].strand == '+'):
+            utr3['cleavage_site'] = a['align'].reference_end
+            utr3['clipped_pos'] = 'start'
+            utr3['last_matched'] = a['qstart']
+        else:
+            utr3['cleavage_site'] = a['align'].reference_start
+            utr3['clipped_pos'] = 'end'
+            utr3['last_matched'] = a['qend']
+        utr3['chrom'] = a['target']
+        result_link = {'clipped_pos': utr3['clipped_pos'], 'txt': utr3, 'cleavage_site': utr3['cleavage_site'], 'from_end': utr3['distance_from_end'], 'tail_seq': None, 'within_utr': utr3['within_utr'], 'novel': True, 'coord': '{}:{}'.format(a['target'], utr3['cleavage_site']), 'last_matched': utr3['last_matched'], 'ests': []}
     if result_link:
         max_mismatch = 0
         if filters is not None and filters.has_key('max_diff_link'):
             max_mismatch = filters['max_diff_link']
-        link_pairs = find_link_pairs(align, chrom, clipped_pos, last_matched, cleavage_site, utr3)
+        link_pairs = find_link_pairs(a, utr3)
         if link_pairs and args.output_reads:
             lines_link += output_link_pairs(align, link_pairs)
     if (len(feature_list) == 0):
         continue
-    results = find_polyA_cleavage(align, chrom, feature_list, qblocks)
+    results = find_polyA_cleavage(a, feature_list)
     if results:
         for result in results:
-            lines_result += output_result(align, result, chrom, link_pairs=link_pairs)
+            lines_result += output_result(a['align'], result, a['target'], link_pairs=link_pairs)
             
             if args.output_reads and result.has_key('bridge_reads') and result['bridge_reads']:
                 lines_bridge += output_bridge_reads(align, result)
                 
     elif result_link is not None:
-        lines_result += output_result(align, result_link, chrom, link_pairs=link_pairs)
+        lines_result += output_result(align, result_link, a['target'], link_pairs=link_pairs)
               
 # close output streams
 output(lines_result, lines_bridge, lines_link)
