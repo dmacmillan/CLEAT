@@ -8,19 +8,19 @@ import subprocess
 import pysam
 
 parser = argparse.ArgumentParser(description='this program tries to find polya cleavage sites through short-read assembly.it is expected that contigs are aligned to contigs, and reads aligned to contigs. these 2 alignment steps can be performed by trans-abyss. the aligners used are gmap for contig-genome and bwa-sw for read-contig alignments. annotations files for ensembl, knowngenes, refseq, and aceview are downloaded from ucsc. est data(optional) are also downloaded from ucsc. the analysis can be composed of 2 phases: 1. contig-centric phase - cleavage sites per contig are captured 2. coordinate-centric phase - contigs capturing the same cleavage site are consolidated into 1 report where expression/evidence-related data are summed. customized filtering based on evidence data can be performed.')
-parser.add_argument('c2g', metavar='<contig-to-genome>', help='the contig-to-genome alignment file in bam format')
-parser.add_argument('contigs', metavar='<contigs>', help='the file containing all contigs in fasta format')
-parser.add_argument('ref_genome', metavar='<reference_genome>', help='the reference genome to use. default is hg19.', default='hg19', choices=['hg18','hg19'])
-parser.add_argument('annot', metavar='<annotations>', help='the annotations file to use with the reference in gtf format.')
-parser.add_argument('r2c', metavar='<reads-to-contigs>', help='the contigs-to-genome alignment file')
-parser.add_argument('out', metavar='<output-file>', help='the file to output results')
-parser.add_argument('-r', '--output_reads', dest='output_reads', help='enable to output read sequences', action='store_true', default=False)
-parser.add_argument('-t', '--trim', dest='trim_reads', help='trim bases of quality <= this value. default is 3.', type=int, default=3)
-parser.add_argument('--use_tmp', help='use tmp space', action='store_true', default=False)
-parser.add_argument('--no_link', help='do not find link pairs', action='store_true', default=False)
-parser.add_argument('-e', '--overlap_est', help='overlap expressed sequence tags', action='store_true', default=False)
-parser.add_argument('--min_at', help='minimum number of a|t bases in tail. default is 4.', type=int, default=4)
-parser.add_argument('--max_diff', help='maximum rate of x to y bases allowed in tail. where x are non a|t bases and y are a|t bases. default: 1 5.', nargs=2, default=[1,5])
+parser.add_argument('c2g', metavar='<contig-to-genome>', help='The contig-to-genome alignment file in bam format')
+parser.add_argument('contigs', metavar='<contigs>', help='The file containing all contigs in fasta format')
+parser.add_argument('ref_genome', metavar='<reference_genome>', help='The reference genome to use. default is hg19.', default='hg19', choices=['hg18','hg19'])
+parser.add_argument('annot', metavar='<annotations>', help='The annotations file to use with the reference in gtf format.')
+parser.add_argument('r2c', metavar='<reads-to-contigs>', help='The contigs-to-genome alignment file')
+parser.add_argument('out', metavar='<output-file>', help='The file to output results')
+parser.add_argument('-r', '--output_reads', dest='output_reads', help='Enable to output read sequences', action='store_true', default=False)
+parser.add_argument('-t', '--trim', dest='trim_reads', help='Trim bases of quality <= this value. default is 3.', type=int, default=3)
+parser.add_argument('--use_tmp', help='Use tmp space', action='store_true', default=False)
+parser.add_argument('--no_link', help='Do not find link pairs', action='store_true', default=False)
+parser.add_argument('-e', '--overlap_est', help='Overlap expressed sequence tags', action='store_true', default=False)
+parser.add_argument('--min_at', help='Minimum number of a|t bases in tail. default is 4.', type=int, default=4)
+parser.add_argument('--max_diff', help='Maximum rate of x to y bases allowed in tail. where x are non a|t bases and y are a|t bases. default: 1 5.', nargs=2, default=[1,5])
 parser.add_argument('--max_diff_link', help='Maximum number of non A|T bases in entire link read. Default is 2.', type=int, default=2)
 parser.add_argument('--min_bridge_size', help='Minimum size of bridge. Default is 1.', type=int, default=1)
 parser.add_argument('-k', '--track', metavar=('[name]','[description]'), help='Name and description of BED graph track to output.', nargs=2)
@@ -66,7 +66,6 @@ contigs = pysam.FastaFile(args.contigs)
 
 # Features (features)
 features = pysam.TabixFile(args.annot, parser=pysam.asGTF())
-#features = pysam.tabix_iterator(open(args.annot), pysam.asGTF())
 
 # Reads to contigs alignment (r2c)
 r2c = pysam.AlignmentFile(args.r2c, "rb")
@@ -291,7 +290,8 @@ def find_link_pairs(a, utr3, homo_len=20, max_mismatch=0):
     else:
         span = (int(utr3['cleavage_site']), int(utr3['cleavage_site']) + genome_buffer)
     #genome_seq = self.refseq.GetSequence(align.target, span[0], span[1])
-    genome_seq = refseq.fetch(a['target'], span[0], span[1])
+    genome_seq = refseq.fetch(a['target'], span[0], span[1]+1)
+    print 'genome_seq: {}'.format(genome_seq)
     if re.search('A{%s,}' % (homo_len), genome_seq, re.IGNORECASE) or re.search('T{%s,}' % (homo_len), genome_seq, re.IGNORECASE):
         sys.stdout.write('genome sequence has polyAT tract - no reliable link pairs can be retrieved %s %s %s:%s-%s\n' % 
                          (a['contig_seq'], utr3['cleavage_site'], a['target'], span[0], span[1]))
@@ -1372,7 +1372,7 @@ def fetchUtr3(alignd, features):
             elif ((f['feature'].start+1) <= alignd['align'].reference_end < f['feature'].end):
                 f['within_utr'] = True
                 utr3 = f
-            f['distance_from_end'] = f['feature'].end - alignd['align'].reference_start
+            f['distance_from_end'] = f['feature'].end - alignd['align'].reference_end
         elif (alignd['strand'] == '-'):
             f['clipped_pos'] = 'end'
             # Feature is exactly the 3UTR
@@ -1384,7 +1384,7 @@ def fetchUtr3(alignd, features):
             elif ((f['feature'].start+1) < alignd['align'].reference_start <= f['feature'].end):
                 f['within_utr'] = True
                 utr3 = f
-            f['distance_from_end'] = f['feature'].start - alignd['align'].reference_end
+            f['distance_from_end'] = f['feature'].start+1 - alignd['align'].reference_start
     return utr3
 
 lines_result = lines_bridge = lines_link = ''
@@ -1400,7 +1400,9 @@ for align in aligns:
         a['strand'] = '-' if align.is_reverse else '+'
     else:
         a['strand'] = None
-    print 'Looking at contig: {}: {}-{}'.format(align.qname,align.reference_start, align.reference_end)
+    print '*'*50
+    print 'Looking at contig: {}-{}-{}'.format(align.qname,align.reference_start, align.reference_end)
+    print '*'*50
     if (align.reference_start == None) or (align.reference_end == None):
         continue
     # Get target/chromosome
@@ -1425,8 +1427,8 @@ for align in aligns:
         elif (feat.feature == 'end_codon'):
             a['cend'] = feat.end
         feature_list.append(r)
-    for f in feature_list:
-        print '\tFeature: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(f['feature'].gene_id,f['feature'].transcript_id,f['feature'].feature,f['feature'].start,f['feature'].end, f['feature'].strand)
+    #for f in feature_list:
+        #print '\tFeature: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(f['feature'].gene_id,f['feature'].transcript_id,f['feature'].feature,f['feature'].start,f['feature'].end, f['feature'].strand)
     # Get the cleavage sites, clipped positions, and last matched for each feature
     a['inf_strand'] = inferStrand(align, [x['feature'] for x in feature_list])
     if (not a['strand']):
@@ -1441,23 +1443,23 @@ for align in aligns:
     a['qend'] = max(a['qblocks'][0][0], a['qblocks'][0][1], a['qblocks'][-1][0], a['qblocks'][-1][1])
     # Print alignment into
 #    print '  cigarstring: {}'.format(align.cigarstring)
-    print '  strand: {}'.format(a['strand'])
+    print '   strand: {}'.format(a['strand'])
 #    print '  qstart: {}'.format(a['qblocks'][0][0])
 #    print '  qend: {}'.format(a['qblocks'][-1][1])
     utr3 = fetchUtr3(a, feature_list)
     result_link = link_pairs = None
     # Find feature closest to 3UTR
     if utr3:
-        print '\t{}'.format(utr3)
-        print '\tutr3: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(utr3['feature'].gene_id,utr3['feature'].transcript_id,utr3['feature'].feature,utr3['feature'].start,utr3['feature'].end, utr3['feature'].strand)
         if (utr3['feature'].strand == '+'):
             utr3['cleavage_site'] = a['align'].reference_end
-            utr3['clipped_pos'] = 'start'
-            utr3['last_matched'] = a['qstart']
-        else:
-            utr3['cleavage_site'] = a['align'].reference_start
             utr3['clipped_pos'] = 'end'
             utr3['last_matched'] = a['qend']
+        else:
+            utr3['cleavage_site'] = a['align'].reference_start
+            utr3['clipped_pos'] = 'start'
+            utr3['last_matched'] = a['qstart']
+        print '\t{}'.format(utr3)
+        print '\tutr3: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(utr3['feature'].gene_id,utr3['feature'].transcript_id,utr3['feature'].feature,utr3['feature'].start,utr3['feature'].end, utr3['feature'].strand)
         utr3['chrom'] = a['target']
         result_link = {'clipped_pos': utr3['clipped_pos'], 'txt': utr3, 'cleavage_site': utr3['cleavage_site'], 'from_end': utr3['distance_from_end'], 'tail_seq': None, 'within_utr': utr3['within_utr'], 'novel': True, 'coord': '{}:{}'.format(a['target'], utr3['cleavage_site']), 'last_matched': utr3['last_matched'], 'ests': []}
     if result_link:
