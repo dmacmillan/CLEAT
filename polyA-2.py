@@ -290,7 +290,7 @@ def find_link_pairs(a, utr3, homo_len=20, max_mismatch=0):
     else:
         span = (int(utr3['cleavage_site']), int(utr3['cleavage_site']) + genome_buffer)
     #genome_seq = self.refseq.GetSequence(align.target, span[0], span[1])
-    genome_seq = refseq.fetch(a['target'], span[0], span[1]+1)
+    genome_seq = refseq.fetch(a['target'], span[0]-1, span[1])
     print 'genome_seq: {}'.format(genome_seq)
     if re.search('A{%s,}' % (homo_len), genome_seq, re.IGNORECASE) or re.search('T{%s,}' % (homo_len), genome_seq, re.IGNORECASE):
         sys.stdout.write('genome sequence has polyAT tract - no reliable link pairs can be retrieved %s %s %s:%s-%s\n' % 
@@ -602,9 +602,9 @@ def find_extended_bridge_reads(a, reads_to_screen, min_len, mismatch, genome_buf
         if reads:
             if (clipped_pos == 'start' and a['strand'] == '+') or\
                (clipped_pos == 'end' and a['strand'] == '-'):
-                target_coord = [int(a['align'].reference_start) - genome_buffer, int(a['align'].reference_end)]
+                target_coord = [int(a['align'].reference_start)+1 - genome_buffer, int(a['align'].reference_end)]
             else:
-                target_coord = [int(a['align'].reference_start), int(a['align'].reference_end) + genome_buffer]
+                target_coord = [int(a['align'].reference_start)+1, int(a['align'].reference_end) + genome_buffer]
             
             query_seqs = dict((read.qname, read.seq) for read in reads) #if not entirely_mapped.has_key(read.qname))
             partial_aligns = align_genome_seq(a, query_seqs, target_coord, 'extended-bridge-genome', get_partial_blat_aln)
@@ -1204,7 +1204,7 @@ def align_genome_seq(a, query_seqs, coord, label, parse_fn):
     result = None
     
     #target_seq = self.refseq.GetSequence(align.target, coord[0], coord[1])
-    target_seq = refseq.fetch(target, coord[0], coord[1])
+    target_seq = refseq.fetch(a['target'], coord[0], coord[1])
     
     #for cleanup
     tmp_files = []
@@ -1428,7 +1428,7 @@ for align in aligns:
             a['cend'] = feat.end
         feature_list.append(r)
     #for f in feature_list:
-        #print '\tFeature: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(f['feature'].gene_id,f['feature'].transcript_id,f['feature'].feature,f['feature'].start,f['feature'].end, f['feature'].strand)
+    #    print '\tFeature: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(f['feature'].gene_id,f['feature'].transcript_id,f['feature'].feature,f['feature'].start,f['feature'].end, f['feature'].strand)
     # Get the cleavage sites, clipped positions, and last matched for each feature
     a['inf_strand'] = inferStrand(align, [x['feature'] for x in feature_list])
     if (not a['strand']):
@@ -1455,7 +1455,7 @@ for align in aligns:
             utr3['clipped_pos'] = 'end'
             utr3['last_matched'] = a['qend']
         else:
-            utr3['cleavage_site'] = a['align'].reference_start
+            utr3['cleavage_site'] = a['align'].reference_start+1
             utr3['clipped_pos'] = 'start'
             utr3['last_matched'] = a['qstart']
         print '\t{}'.format(utr3)
