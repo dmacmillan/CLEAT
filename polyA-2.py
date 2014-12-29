@@ -58,6 +58,8 @@ if (args.c2g.split('.')[-1].lower() == 'bam'):
     logger.debug("Contig to genome alignment file is in BAM format, loading BAM file...")
     aligns = pysam.AlignmentFile(args.c2g, "rb")
     logger.debug("Contig to genome alignment file loaded successfully")
+elif (args.c2g.split('.')[-1].lower() == 'sam'):
+    aligns = pysam.AlignmentFile(args.c2g, "r")
 else:
     sys.exit("Unrecognized format for <aln>, must be BAM format file. Exiting.")
 
@@ -291,7 +293,7 @@ def find_link_pairs(a, utr3, homo_len=20, max_mismatch=0):
         span = (int(utr3['cleavage_site']), int(utr3['cleavage_site']) + genome_buffer)
     #genome_seq = self.refseq.GetSequence(align.target, span[0], span[1])
     genome_seq = refseq.fetch(a['target'], span[0]-1, span[1])
-    print 'genome_seq: {}'.format(genome_seq)
+    #print 'genome_seq: {}'.format(genome_seq)
     if re.search('A{%s,}' % (homo_len), genome_seq, re.IGNORECASE) or re.search('T{%s,}' % (homo_len), genome_seq, re.IGNORECASE):
         sys.stdout.write('genome sequence has polyAT tract - no reliable link pairs can be retrieved %s %s %s:%s-%s\n' % 
                          (a['contig_seq'], utr3['cleavage_site'], a['target'], span[0], span[1]))
@@ -602,7 +604,7 @@ def find_extended_bridge_reads(a, reads_to_screen, min_len, mismatch, genome_buf
         if reads:
             if (clipped_pos == 'start' and a['strand'] == '+') or\
                (clipped_pos == 'end' and a['strand'] == '-'):
-                target_coord = [int(a['align'].reference_start)+1 - genome_buffer, int(a['align'].reference_end)]
+                target_coord = [max(0, int(a['align'].reference_start)+1 - genome_buffer), int(a['align'].reference_end)]
             else:
                 target_coord = [int(a['align'].reference_start)+1, int(a['align'].reference_end) + genome_buffer]
             
@@ -1390,8 +1392,8 @@ def fetchUtr3(alignd, features):
 lines_result = lines_bridge = lines_link = ''
 i=0
 for align in aligns:
-    if i == 5:
-        sys.exit()
+    #if i == 5:
+    #    sys.exit()
     #sys.stdout.write('\rProcessing alignment {}'.format(i))
     i+=1
     a = {'align': align}
