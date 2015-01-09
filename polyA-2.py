@@ -16,6 +16,7 @@ parser.add_argument('r2c', metavar='<reads-to-contigs>', help='The contigs-to-ge
 parser.add_argument('out', metavar='<output-file>', help='The file to output results')
 parser.add_argument('-r', '--output_reads', dest='output_reads', help='Enable to output read sequences', action='store_true', default=False)
 parser.add_argument('-t', '--trim', dest='trim_reads', help='Trim bases of quality <= this value. default is 3.', type=int, default=3)
+parser.add_argument('-ss', '--strand_specific', action='store_true', help='Enable if reads are strand specific.')
 parser.add_argument('--use_tmp', help='Use tmp space', action='store_true', default=False)
 parser.add_argument('--no_link', help='Do not find link pairs', action='store_true', default=False)
 parser.add_argument('-e', '--overlap_est', help='Overlap expressed sequence tags', action='store_true', default=False)
@@ -25,6 +26,8 @@ parser.add_argument('--max_diff_link', help='Maximum number of non A|T bases in 
 parser.add_argument('--min_bridge_size', help='Minimum size of bridge. Default is 1.', type=int, default=1)
 parser.add_argument('-k', '--track', metavar=('[name]','[description]'), help='Name and description of BED graph track to output.', nargs=2)
 parser.add_argument('--rgb', help='RGB value of BED graph. Default is 0,0,255', default='0,0,255')
+parser.add_argument('-c', help='Specify a contig to look at.')
+parser.add_argument('-x', '--combine', dest='combine', action='store_true', help='Path of discovery phase results for combining.')
 
 args = parser.parse_args()
 logging.basicConfig(level=logging.INFO)
@@ -39,11 +42,6 @@ bridge_total = 0
 link_pairs_total = 0
 basic_total = 0
 
-# Filters (filters)
-filters = {}
-filters['min_at'] = args.min_at
-filters['max_diff'] = args.max_diff
-filters['max_diff_link'] = args.max_diff_link
 
 # Reference genome sequence (refseq)
 if (args.ref_genome == 'hg19'):
@@ -86,6 +84,8 @@ if args.trim_reads:
             poor_quals += poor_qual
 
 output_fields=['gene','transcript','transcript_strand','coding','contig','chromosome','cleavage_site','within_UTR','distance_from_annotated_site','ESTs','length_of_tail_in_contig','number_of_tail_reads','number_of_bridge_reads','max_bridge_read_tail_length','bridge_read_identities','tail+bridge_reads','number_of_link_pairs','max_link_pair_length','link_pair_identities']
+if args.c:
+    args.out += '.'+args.c
 out_result = open(args.out, 'a')
 out_result.write('%s\n' % '\t'.join(output_fields))
 prefix = os.path.splitext(args.out)[0]
@@ -93,6 +93,14 @@ out_bridge_reads_file = prefix + '-reads.fa'
 out_link_pairs_file = prefix + '-link.fa'
 out_bridge_reads = open(out_bridge_reads_file, 'a')
 out_link_pairs = open(out_link_pairs_file, 'a')
+
+# Filters (filters)
+filters = {}
+filters['min_at'] = args.min_at
+filters['max_diff'] = args.max_diff
+filters['max_diff_link'] = args.max_diff_link
+if args.combine:
+    filters['min_bridge_size'] = args.min_bridge_size
 
 def ucsc_chroms(genome):
     """Extracts conversion of UCSC chromosome names
@@ -107,6 +115,203 @@ def ucsc_chroms(genome):
             conversions[chr_from] = chr_to
             
     return conversions
+
+def group_and_filter(lines_result, out_file, filters=None, make_track=None, rgb='0,0,0'):
+    global output_fields
+    """Consolidates contig-centric results into coordinate-centric results
+    
+    path = directory of tab-delimited results files
+    """
+    groups = {}
+    
+    lines_result = [x.split('\t') for x in lines_result.splitlines()]
+    for line in lines_result:
+        if line[0] == output_fields[0]:
+            continue
+        
+        chrom, cleavage_site = line[5], line[6]
+        if not groups.has_key(chrom):
+            groups[chrom] = {}
+        if not groups[chrom].has_key(cleavage_site):
+            groups[chrom][cleavage_site] = []
+        groups[chrom][cleavage_site].append(line)
+            
+    stats = {'gene': {},
+             'transcript': {'coding': {}, 'noncoding':{}},
+             'screened_out': 0,
+             'cleavage_site': 0,
+             'with_tail': 0,
+             'tail_and_bridge_and_link': 0,
+             'tail_and_bridge': 0,
+             'tail_and_link': 0,
+             'bridge_and_link': 0,
+             'just_tail': 0,
+             'just_bridge': 0,
+             'just_link': 0,
+             }
+            
+    out = open(out_file, 'w')
+    out.write('%s\n' % '\t'.join(output_fields))
+    
+    track_plus = []
+    track_minus = []
+    for chrom in sorted(groups.keys(), cmp=compare_chr):
+        for cleavage in sorted(groups[chrom].keys()):
+            # Skip if there is no tail, bridge reads, and link pairs
+            if (int(result[10]) == 0) and (int(result[12]) == 0) and (int(result[16]) == 0):
+                continue
+            results = groups[chrom][cleavage]
+            # if more than one contig reports same cleavage site, add up the support numbers
+            if len(results) > 1:
+                result = merge_results(results)
+            else:
+                result = results[0]
+                                    
+            if filters is not None and filters.has_key('min_bridge_size') and int(result[13]) < filters['min_bridge_size']:
+                continue
+                
+            out.write('%s\n' % '\t'.join(result))
+            if make_track is not None:
+                if result[2] == '+':
+                    track_plus.append(show_expression(result))
+                else:
+                    track_minus.append(show_expression(result))
+            
+            # stats
+            update_stats(stats, result)
+                
+    out.close()
+        
+    # prefix used for track and stats files
+    prefix = os.path.splitext(out_file)[0]
+    # output track
+    if make_track is not None:
+        track_file = prefix + '.bg'
+        cls.output_track(track_file, make_track[0], make_track[1], rgb=rgb, plus=track_plus, minus=track_minus)
+        
+    # output stats file
+    stats_file = prefix + '.stats'
+    cls.output_stats(stats, stats_file)
+
+def output_track(out_file, name, desc, rgb='0,0,0', plus=[], minus=[]):
+    """Outputs bedgraph, separate tracks for plus and minus strands"""
+    out = open(out_file, 'w')
+    # plus strand
+    out.write('%s\n' % prepare_track_header(name + ' (+)', desc + ' plus strand', rgb))
+    for line in plus:
+        out.write('%s\n' % line)
+    # minus strand
+    out.write('%s\n' % prepare_track_header(name + '(-)', desc + ' minus strand', rgb))
+    for line in minus:
+        out.write('%s\n' % line)
+    out.close()
+
+def merge_results(results):        
+    """Merges results from different contigs of same cleavage site into single result"""
+    # join fields: contig, bridge_name, link_name
+    join = [4, 14, 18]              
+    # add fields: num_tail_reads, num_bridge_reads, tail+bridge, num_link_pairs
+    add = [11, 12, 15, 16]
+    # max fields: tail_len, bridge_len, link_len
+    biggest = [10, 13, 17]
+    
+    merged = []
+    for i in range(len(results[0])):
+        if i in add:
+            data = [int(r[i]) for r in results if r[i].isdigit()]
+            if data:
+                merged.append(str(sum(data)))
+            else:
+                merged.append('-')              
+        elif i in biggest:
+            data = [int(r[i]) for r in results if r[i].isdigit()]
+            if data:
+                merged.append(str(max(data)))
+            else:
+                merged.append('-')              
+        elif i in join:
+            data = [r[i] for r in results if r[i] != '-']
+            
+            # if there is data other than '-', then list all items
+            if data:
+                merged.append(','.join([r[i] for r in results if r[i] != '-']))
+            else:
+                merged.append('-')                  
+        else:
+            merged.append(results[0][i])
+
+    return merged
+
+def update_stats(stats, result):
+    """Updates summary stats with result
+    
+    stats = dictionary of final stats results
+    result = list of values of each output line
+    """
+    has_tail = has_bridge = has_link = False
+    if result[10].isdigit() and int(result[10]) > 0:
+        has_tail = True
+    if result[12].isdigit() and int(result[12]) > 0:
+        has_bridge = True
+    if result[16].isdigit() and int(result[16]) > 0:
+        has_link = True
+        
+    if not (has_tail or has_bridge or has_link):
+        return
+        
+    stats['cleavage_site'] += 1
+    
+    if not stats['gene'].has_key(result[0]):
+        stats['gene'][result[0]] = 0
+    stats['gene'][result[0]] += 1
+    
+    if result[3] == 'yes':
+        stats['transcript']['coding'][result[1]] = True
+    elif result[3] == 'no':
+        stats['transcript']['noncoding'][result[1]] = True
+    else:
+        stats['transcript']['unknown'][result[1]] = True
+                        
+    if has_tail and has_bridge and has_link:
+        stats['tail_and_bridge_and_link'] += 1
+    elif has_tail and has_bridge:
+        stats['tail_and_bridge'] += 1
+    elif has_bridge and has_link:
+        stats['bridge_and_link'] += 1
+    elif has_tail and has_link:
+        stats['tail_and_link'] += 1
+    elif has_tail:
+        stats['just_tail'] += 1
+    elif has_bridge:
+        stats['just_bridge'] += 1
+    elif has_link:
+        stats['just_link'] += 1
+
+def output_stats(stats, out_file):
+    """Outputs stats data into output file"""
+    out = open(out_file, 'w')
+    out.write('total cleavage sites: %d\n' % stats['cleavage_site'])
+    out.write('cleavage sites with tail, bridge, link support: %d\n' % stats['tail_and_bridge_and_link'])
+    out.write('cleavage sites with tail, bridge support: %d\n' % stats['tail_and_bridge'])
+    out.write('cleavage sites with tail, link support: %d\n' % stats['tail_and_link'])
+    out.write('cleavage sites with bridge, link support: %d\n' % stats['bridge_and_link'])
+    out.write('cleavage sites with only tail support: %d\n' % stats['just_tail'])
+    out.write('cleavage sites with only bridge support: %d\n' % stats['just_bridge'])
+    out.write('cleavage sites with only link support: %d\n' % stats['just_link'])
+    out.write('total genes: %d\n' % len(stats['gene'].keys()))
+    out.write('average cleavage sites per gene: %.1f\n' % (float(stats['cleavage_site'])/len(stats['gene'].keys())))
+    out.write('total transcripts: %d\n' % (len(stats['transcript']['coding'].keys()) + len(stats['transcript']['noncoding'].keys())))
+    out.write('total coding transcripts: %d\n' % len(stats['transcript']['coding'].keys()))
+    out.write('total noncoding transcripts: %d\n' % len(stats['transcript']['noncoding'].keys()))
+    out.close()
+
+def prepare_track_header(name, desc, rgb):
+    """Creates header for track"""
+    return 'track type=bedGraph name="%s" description="%s" visibility=full color=%s' % (name, desc, rgb)
+
+def show_expression(result):
+    """Creates bed-graph line depicting expression of cleavage site"""
+    return '%s %s %s %s' % (result[5], int(result[6]) - 1, result[6], result[15])
 
 # chrom_proper
 chrom_proper = ucsc_chroms(args.ref_genome)
@@ -126,7 +331,7 @@ def qpos_to_tpos(a, qpos):
     tpos = None
     try:
         if (a['strand'] == '+'):
-            tpos = blocks[block][0] + qpos - a['qblocks'][block][0]
+            tpos = blocks[block][0]+1 + qpos - a['qblocks'][block][0] # added the +1
         else:
             tpos = blocks[block][1] - (qpos - a['qblocks'][block][1])
     except NameError:
@@ -367,7 +572,8 @@ def is_bridge_read_good(clipped_seq, base, min_len, mismatch):
             good = True
         elif is_polyA_tail(clipped_seq, base, min_len=min_len, max_nonAT_allowed=mismatch):
             good = True
-
+        #if good:
+            #print '{}-{}'.format(clipped_seq, good)
         return good
 
 def trim_bases(seq, qual, end=None):
@@ -548,6 +754,10 @@ def annotate_cleavage_site(a, feature_list, cleavage_site, clipped_pos, base, mi
     #return result
 
 def find_polyA_cleavage(a, feature_list):
+    print
+    print 'find_polyA_cleavage'
+    print '~'*50
+    global filters
     """Finds PolyA cleavage sites of a given aligned contig
     
     This method first checks if the given contig captures a polyA tail (find_tail_contig),
@@ -798,7 +1008,11 @@ def filter_vs_reference(align, target, clipped_reads):
             os.remove(ff)
 
 def find_bridge_reads(a, min_len, mismatch, genome_buffer=1000, tail=None):
+    print
+    print 'find_bridge_reads'
+    print '~'*50
     global bridge_total
+    global filters
     #print "Running find_bridge_reads"
     """Finds bridge reads
     
@@ -813,16 +1027,17 @@ def find_bridge_reads(a, min_len, mismatch, genome_buffer=1000, tail=None):
     # identify clipped reads that are potential pA/pT
     clipped_reads = {'start':{}, 'end':{}}
     second_round = {'start':[], 'end':[]}
-    for read in r2c.fetch(a['align'].qname):
     #for read in self.bam.bam.fetch(align.query):
+    for read in r2c.fetch(a['align'].query_name):
         if not read.cigar or len(read.cigar) != 2:
             continue
-                    
         if (read.cigar[0][0] == 4 or read.cigar[0][0] == 5) or\
            (read.cigar[-1][0] == 4 or read.cigar[-1][0] == 5):
             # clipped at start
             if read.cigar[0][0] == 4 or read.cigar[0][0] == 5:
                 clipped_pos = 'start'
+                #print read
+                #test = raw_input('Press any key to continue')
                 last_matched = read.pos + 1
                 # to see whether the clipped seq is a pA tail
                 clipped_seq = read.seq[:read.cigar[0][1]]
@@ -859,7 +1074,7 @@ def find_bridge_reads(a, min_len, mismatch, genome_buffer=1000, tail=None):
                 
             if len(clipped_seq) < 1:
                 continue
-            if filters is not None and filters.has_key('min_bridge_size') and len(clipped_seq) < filters['min_bridge_size']:
+            if filters is not None and filters.has_key('min_bridge_size') and (len(clipped_seq) < filters['min_bridge_size']):
                 continue
             
             # reverse complement to be in agreement with reference instead of contig
@@ -870,6 +1085,7 @@ def find_bridge_reads(a, min_len, mismatch, genome_buffer=1000, tail=None):
             # check for possible tail (stretch of A's or T's)
             #pos_genome = align.qpos_to_tpos(last_matched)
             pos_genome = qpos_to_tpos(a, last_matched)
+                
             picked = False
             for base in ('A', 'T'):
                 if is_bridge_read_good(clipped_seq_genome, base, min_len, mismatch):
@@ -886,10 +1102,21 @@ def find_bridge_reads(a, min_len, mismatch, genome_buffer=1000, tail=None):
                     
     extended_clipped_reads = find_extended_bridge_reads(a, second_round, min_len, mismatch)
     merge_clipped_reads(clipped_reads, extended_clipped_reads)
-                
+
+    # Make sure only one end is used for cleavage sites (pick side with more reads)
+    #if bool(clipped_reads['start']) and bool(clipped_reads['end']):
+    #    if (len(clipped_reads['end']) > len(clipped_reads['start'])):
+    #        clipped_reads['start'] = {}
+
     # filter events against reference sequence
     #filter_vs_reference(align, target, clipped_reads)
     
+    print
+    print 'clipped_reads:'
+    print '@'*50
+    print clipped_reads
+    
+
     # translate into results
     if tail is None:
         results = {}
@@ -902,7 +1129,6 @@ def find_bridge_reads(a, min_len, mismatch, genome_buffer=1000, tail=None):
                 cleavage_site = tail[clipped_pos][i][1]
                 tail_search[clipped_pos][cleavage_site] = i
                             
-    #print 'clipped_reads: {}'.format(clipped_reads)
     for clipped_pos in clipped_reads:
         if clipped_pos not in results:
             results[clipped_pos] = []
@@ -925,6 +1151,7 @@ def find_bridge_reads(a, min_len, mismatch, genome_buffer=1000, tail=None):
                                                      [r[0] for r in clipped_reads[clipped_pos][pos][base]], 
                                                      [r[1] for r in clipped_reads[clipped_pos][pos][base]]
                                                      ])      
+    print 'Done find_bridge_reads: {}'.format(results)
     return results
 
 def proper_chrom(chrom, genome=None, chrom_proper=None):
@@ -986,6 +1213,9 @@ def get_num_tail_reads(align, last_matched):
     return num
 
 def find_tail_contig(a, min_len, mismatch):
+    print
+    print 'find_tail_contig'
+    print '~'*50
     global basic_total
     """Finds contigs that have polyA tail reconstructed"""
     # size of stretch of contig sequence to be added to polyA tail
@@ -996,22 +1226,26 @@ def find_tail_contig(a, min_len, mismatch):
     clipped = {'start':False, 'end':False}
     if int(a['qstart']) > 1:
         clipped['start'] = True
-        
-    if int(a['qend']) < int(a['align'].query_length):
+    
+    if int(a['qend']) < int(a['align'].infer_query_length(True)):
         clipped['end'] = True
         
+    print 'clipped: {}'.format(clipped)
     for clipped_pos in ('start', 'end'):
         if clipped[clipped_pos]:
             if clipped_pos == 'start':
                 last_matched = int(a['qstart'])
-                clipped_seq = a['contig_seq'][:int(a['qstart'])-1]
-                junction_seq = a['contig_seq'][:int(a['qstart']) - 1 + junction_buffer]
+                clipped_seq = a['contig_seq'][:int(a['qstart'])-1] # used to have -1
+                junction_seq = a['contig_seq'][:int(a['qstart']) -1 + junction_buffer] # used to have -1
             else:
                 last_matched = int(a['qend'])
                 clipped_seq = a['contig_seq'][int(a['qend']):]
                 junction_seq = a['contig_seq'][int(a['qend']) - junction_buffer:]
                                     
+            print 'clipped_seq: {}'.format(clipped_seq)
+            print 'junction_seq: {}'.format(junction_seq)
             cleavage_site = qpos_to_tpos(a, last_matched)
+            print 'cleavage_site: {}'.format(cleavage_site)
             clipped_seq_genome = clipped_seq
             if a['strand'] == '-':
                 clipped_seq_genome = revComp(clipped_seq)
@@ -1024,6 +1258,9 @@ def find_tail_contig(a, min_len, mismatch):
                 perfect = is_polyA_tail(clipped_seq_genome, base, min_len=1, max_nonAT_allowed=[0, 1])
                 #imperfect = self.is_polyA_tail(clipped_seq_genome, base, min_len=4, max_nonAT_allowed=[1, 4])
                 imperfect = is_polyA_tail(clipped_seq_genome, base, min_len=min_len, max_nonAT_allowed=mismatch)
+
+                print 'perfect: {}'.format(perfect)
+                print 'imperfect: {}'.format(imperfect)
                 
                 if perfect or imperfect:
                     basic_total += 1
@@ -1040,7 +1277,7 @@ def find_tail_contig(a, min_len, mismatch):
                     #    continue
                     
                     # find reads corresponding to tail
-                    num_tail_reads = get_num_tail_reads(align, last_matched)
+                    num_tail_reads = get_num_tail_reads(a['align'], last_matched)
                                                                     
                     if not results.has_key(clipped_pos):
                         results[clipped_pos] = []
@@ -1058,6 +1295,7 @@ def find_tail_contig(a, min_len, mismatch):
     if not clipped['start'] and not clipped['end']:
         results = None
         
+    print 'Done find_tail_contig: {}'.format(results)
     return results
 
 def align_transcript_seq(align, target, query_seqs, label, parse_fn):
@@ -1392,9 +1630,11 @@ def fetchUtr3(alignd, features):
 lines_result = lines_bridge = lines_link = ''
 i=0
 for align in aligns:
-    #if i == 5:
-    #    sys.exit()
-    #sys.stdout.write('\rProcessing alignment {}'.format(i))
+    if args.c:
+        if align.query_name != args.c:
+            continue
+    if (i > 10):
+        continue
     i+=1
     a = {'align': align}
     a['contig_seq'] = contigs.fetch(align.query_name)
@@ -1430,7 +1670,7 @@ for align in aligns:
             a['cend'] = feat.end
         feature_list.append(r)
     #for f in feature_list:
-    #    print '\tFeature: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(f['feature'].gene_id,f['feature'].transcript_id,f['feature'].feature,f['feature'].start,f['feature'].end, f['feature'].strand)
+        #print '\tFeature: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(f['feature'].gene_id,f['feature'].transcript_id,f['feature'].feature,f['feature'].start,f['feature'].end, f['feature'].strand)
     # Get the cleavage sites, clipped positions, and last matched for each feature
     a['inf_strand'] = inferStrand(align, [x['feature'] for x in feature_list])
     if (not a['strand']):
@@ -1443,11 +1683,6 @@ for align in aligns:
         continue
     a['qstart'] = min(a['qblocks'][0][0], a['qblocks'][0][1], a['qblocks'][-1][0], a['qblocks'][-1][1])
     a['qend'] = max(a['qblocks'][0][0], a['qblocks'][0][1], a['qblocks'][-1][0], a['qblocks'][-1][1])
-    # Print alignment into
-#    print '  cigarstring: {}'.format(align.cigarstring)
-    print '   strand: {}'.format(a['strand'])
-#    print '  qstart: {}'.format(a['qblocks'][0][0])
-#    print '  qend: {}'.format(a['qblocks'][-1][1])
     utr3 = fetchUtr3(a, feature_list)
     result_link = link_pairs = None
     # Find feature closest to 3UTR
@@ -1460,8 +1695,8 @@ for align in aligns:
             utr3['cleavage_site'] = a['align'].reference_start+1
             utr3['clipped_pos'] = 'start'
             utr3['last_matched'] = a['qstart']
-        print '\t{}'.format(utr3)
-        print '\tutr3: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(utr3['feature'].gene_id,utr3['feature'].transcript_id,utr3['feature'].feature,utr3['feature'].start,utr3['feature'].end, utr3['feature'].strand)
+        #print '\tutr3: gene:{}\ttid:{}\t{}\t{}\t{}\t{}'.format(utr3['feature'].gene_id,utr3['feature'].transcript_id,utr3['feature'].feature,utr3['feature'].start,utr3['feature'].end, utr3['feature'].strand)
+        #print '\t{}'.format(utr3)
         utr3['chrom'] = a['target']
         result_link = {'clipped_pos': utr3['clipped_pos'], 'txt': utr3, 'cleavage_site': utr3['cleavage_site'], 'from_end': utr3['distance_from_end'], 'tail_seq': None, 'within_utr': utr3['within_utr'], 'novel': True, 'coord': '{}:{}'.format(a['target'], utr3['cleavage_site']), 'last_matched': utr3['last_matched'], 'ests': []}
     if result_link:
@@ -1473,6 +1708,19 @@ for align in aligns:
             lines_link += output_link_pairs(align, link_pairs)
     if (len(feature_list) == 0):
         continue
+    print 'contig\ttarget\ttstrand\ttstart\ttend\tqstrand\tqstart\tqend\tblocks\tqblocks\tcigar\tseq'
+    print '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(align.qname, \
+                                                                a['target'], \
+                                                                None, \
+                                                                align.reference_start, \
+                                                                align.reference_end, \
+                                                                a['strand'], \
+                                                                a['qstart'], \
+                                                                a['qend'], \
+                                                                align.blocks, \
+                                                                a['qblocks'], \
+                                                                a['align'].cigar, \
+                                                                a['contig_seq'])
     results = find_polyA_cleavage(a, feature_list)
     if results:
         for result in results:
@@ -1485,7 +1733,10 @@ for align in aligns:
         lines_result += output_result(align, result_link, a['target'], link_pairs=link_pairs)
               
 # close output streams
-output(lines_result, lines_bridge, lines_link)
+if args.combine:
+    group_and_filter(lines_result, args.out, filters=filters, make_track=args.track, rgb=args.rgb)
+else:
+    output(lines_result, lines_bridge, lines_link)
 
 with open('./stuff', 'w') as f:
     f.write('basic: {}\n'.format(basic_total))
