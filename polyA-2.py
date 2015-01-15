@@ -835,9 +835,9 @@ def find_extended_bridge_reads(a, reads_to_screen, min_len, mismatch, genome_buf
         if reads:
             if (clipped_pos == 'start' and a['strand'] == '+') or\
                (clipped_pos == 'end' and a['strand'] == '-'):
-                target_coord = [int(a['align'].reference_start) - genome_buffer, int(a['align'].reference_end)]
+                target_coord = [int(a['align'].reference_start)+1 - genome_buffer, int(a['align'].reference_end)]
             else:
-                target_coord = [int(a['align'].reference_start), int(a['align'].reference_end) + genome_buffer]
+                target_coord = [int(a['align'].reference_start)+1, int(a['align'].reference_end) + genome_buffer]
             
             query_seqs = dict((read.qname, read.seq) for read in reads)# if not entirely_mapped.has_key(read.qname))
             partial_aligns = align_genome_seq(a, query_seqs, target_coord, 'extended-bridge-genome', get_partial_blat_aln)
@@ -1183,7 +1183,6 @@ def find_bridge_reads(a, min_len, mismatch, genome_buffer=1000, tail=None):
             
             # check for possible tail (stretch of A's or T's)
             pos_genome = qpos_to_tpos(a, last_matched)
-                
             picked = False
             #print 'clipped_seq_genome:\n{}'.format(clipped_seq_genome)
             for base in ('A', 'T'):
@@ -1197,7 +1196,6 @@ def find_bridge_reads(a, min_len, mismatch, genome_buffer=1000, tail=None):
                     
             if not picked:
                 second_round[clipped_pos].append(read)
-                
     extended_clipped_reads = find_extended_bridge_reads(a, second_round, min_len, mismatch)
     merge_clipped_reads(clipped_reads, extended_clipped_reads)
 
@@ -1238,7 +1236,6 @@ def find_bridge_reads(a, min_len, mismatch, genome_buffer=1000, tail=None):
                                                      [r[0] for r in clipped_reads[clipped_pos][pos][base]], 
                                                      [r[1] for r in clipped_reads[clipped_pos][pos][base]]
                                                      ])      
-    #print 'find_bridge_reads results:\n{}'.format(results)
     return results
 
 def proper_chrom(chrom, genome=None, chrom_proper=None):
@@ -1522,9 +1519,7 @@ def align_genome_seq(a, query_seqs, coord, label, parse_fn):
     result = None
     
     #target_seq = self.refseq.GetSequence(align.target, coord[0], coord[1])
-    if (coord[0] < 0):
-        coord[0] = 0
-    target_seq = refseq.fetch(a['target'], coord[0], coord[1])
+    target_seq = refseq.fetch(a['target'], min(0, coord[0]-1), coord[1]).upper()
     
     #for cleanup
     tmp_files = []
